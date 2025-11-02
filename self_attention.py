@@ -47,11 +47,10 @@ class CausalSelfAttention(torch.nn.Module):
         self.W_query = torch.nn.Linear(d_in, d_out, bias=False)
         self.W_key = torch.nn.Linear(d_in, d_out, bias=False)
         self.W_value = torch.nn.Linear(d_in, d_out, bias=False)
-        self.context_len = context_len
         self.dropout = torch.nn.Dropout(dropout)
         self.register_buffer(
             'mask',
-            torch.tril(torch.ones(self.context_len, self.context_len), diagonal=0)
+            torch.tril(torch.ones(context_len, context_len), diagonal=0)
         )
 
     def forward(self, x):
@@ -71,3 +70,12 @@ class CausalSelfAttention(torch.nn.Module):
 
         print(context_vec)
         return context_vec
+
+class MultiHeadedAttentionWrapper(torch.nn.Module):
+    def __init__(self, d_in, d_out, context_len, dropout, num_heads):
+        super().__init__()
+        self.heads = [CausalSelfAttention(d_in, d_out, context_len, dropout) for _ in range(num_heads)]
+    
+    def forward(self, x):
+        return torch.cat([head(x) for head in self.heads], dim=-1)
+
