@@ -40,3 +40,41 @@ class DummyLayerNorm(torch.nn.Module):
 
     def forward(self, x):
         return x
+    
+
+class LayerNorm(torch.nn.Module):
+    def __init__(self, emb_dim):
+        super().__init__()
+        self.eps = 1e-8
+        self.scale = torch.nn.Parameter(torch.ones(emb_dim))
+        self.shift = torch.nn.Parameter(torch.zeros(emb_dim))
+
+    def forward(self, x):
+        mean = x.mean(dim=-1, keepdim=True)
+        var = x.var(dim=-1, keepdim=True, unbiased=False)
+        norm = (x - mean) / torch.sqrt(var + self.eps)
+        return self.scale * norm + self.shift
+    
+
+class GELU(torch.nn.Module):
+    def __init__(self,):
+        super().__init__()
+    
+    def forward(self, x):
+        return 0.5 * x * (1 + torch.tanh(
+            torch.sqrt(torch.tensor(2/torch.pi)) * 
+            (x + 0.044715 * torch.pow(x, 3))
+        ))
+
+
+class FeedForward(torch.nn.Module):
+    def __init__(self, cfg):
+        super().__init__()
+        self.layers = torch.nn.Sequential(
+            torch.nn.Linear(cfg['emb_dim'], 4 * cfg['emb_dim']),
+            GELU(),
+            torch.nn.Linear(4 * cfg['emb_dim'], cfg['emb_dim'])
+        )
+    
+    def forward(self, x):
+        return self.layers(x)
