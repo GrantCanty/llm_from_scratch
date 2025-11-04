@@ -79,16 +79,16 @@ class MultiHeadedAttentionWrapper(torch.nn.Module):
 
 
 class MultiHeadedAttention(torch.nn.Module):
-    def __init__(self, d_in, d_out, context_len, dropout, num_heads):
+    def __init__(self, d_in, d_out, context_len, dropout, num_heads, qkv_bias=False):
         super().__init__()
         assert d_out % num_heads == 0, "d_out must be divisible by num_heads"
 
         self.d_out = d_out
         self.num_heads = num_heads
         self.head_dim = d_out // num_heads
-        self.W_query = torch.nn.Linear(d_in, d_out, bias=False)
-        self.W_key = torch.nn.Linear(d_in, d_out, bias=False)
-        self.W_value = torch.nn.Linear(d_in, d_out, bias=False)
+        self.W_query = torch.nn.Linear(d_in, d_out, bias=qkv_bias)
+        self.W_key = torch.nn.Linear(d_in, d_out, bias=qkv_bias)
+        self.W_value = torch.nn.Linear(d_in, d_out, bias=qkv_bias)
         self.out_proj = torch.nn.Linear(d_out, d_out)
         self.dropout = torch.nn.Dropout(dropout)
         self.register_buffer(
