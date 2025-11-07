@@ -88,7 +88,7 @@ def train_model_simple_function(model, train_loader, val_loader, optimizer, devi
                 track_tokens_seen.append(tokens_seen)
                 print(f'epoch {epoch+1} (step {global_step:06d})\ntrain_loss: {train_loss:.3f} val_loss: {val_loss:.3f}')
     
-        generate_and_print_sample(model, tokenizer, device, start_context)
+        generate_and_print_sample(model, tokenizer, device, start_context, top_k=15, temperature=1)
     return train_losses, val_losses, track_tokens_seen
 
 def evaluate_model(model, train_loader, val_loader, device, eval_iter):
