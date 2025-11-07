@@ -1,15 +1,16 @@
 import torch
+import transformer
 
 
-class DummyGPTModel(torch.nn.Module):
+class GPTModel(torch.nn.Module):
     def __init__(self, cfg):
         super().__init__()
         self.tok_emb = torch.nn.Embedding(cfg['vocab_size'], cfg['emb_dim'])
         self.pos_emb = torch.nn.Embedding(cfg['context_length'], cfg['emb_dim'])
         self.drop_emb = torch.nn.Dropout(cfg['drop_rate'])
         self.trf_blocks = torch.nn.Sequential(
-            *[DummyTransformerBlock(cfg) for _ in range(cfg['n_layers'])])
-        self.final_norm = DummyLayerNorm(cfg['emb_dim'])
+            *[transformer.TransformerBlock(cfg) for _ in range(cfg['n_layers'])])
+        self.final_norm = LayerNorm(cfg['emb_dim'])
         self.out_head = torch.nn.Linear(
             cfg['emb_dim'], cfg['vocab_size'], bias=False
         )
@@ -24,22 +25,6 @@ class DummyGPTModel(torch.nn.Module):
         x = self.final_norm(x)
         logits = self.out_head(x)
         return logits
-    
-
-class DummyTransformerBlock(torch.nn.Module):
-    def __init__(self, cfg):
-        super().__init__()
-    
-    def forward(self, x):
-        return x
-    
-
-class DummyLayerNorm(torch.nn.Module):
-    def __init__(self, normalized_shape, eps=1e5):
-        super().__init__()
-
-    def forward(self, x):
-        return x
     
 
 class LayerNorm(torch.nn.Module):
@@ -78,3 +63,14 @@ class FeedForward(torch.nn.Module):
     
     def forward(self, x):
         return self.layers(x)
+    
+
+'''def train_model_simple_function(model, train_loader, val_loader, optimizer, device, num_epochs, eval_freq, eval_iter, start_context, tokenizer):
+    train_losses, val_losses, track_tokens_seen = [], [], []
+    tokens_seen, global_step = 0, -1
+
+    for epoch in range(num_epochs):
+        model.train()
+        for input_batch, target_batch, in train_loader:
+            optimizer.zero_grad()
+            loss = '''
