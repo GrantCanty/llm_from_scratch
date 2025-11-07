@@ -23,17 +23,31 @@ def calc_loss_loader(data_loader, model, device, num_batches=None):
             break
     return total_loss/num_batches
 
-def generate_text_simple(model, idx, max_new_tokens, context_size):
+def generate_text_simple(model, idx, max_new_tokens, context_size, temperature=1.0, top_k=None, eos_id=None):
     for _ in range(max_new_tokens):
         idx_cond = idx[:, -context_size:]
         with torch.no_grad():
             logits = model(idx_cond)
-        
         logits = logits[:, -1, :]
-        probabs = torch.softmax(logits, dim=-1)
-        idx_next = torch.argmax(probabs, dim=-1, keepdim=True)
-        idx = torch.cat((idx, idx_next), dim=-1)
-
+        if top_k is not None:
+            top_logs, _ = torch.topk(logits, top_k)
+            min_val = top_logs[:, -1]
+            logits = torch.where(
+                logits < min_val,
+                torch.tensor(float('-inf')).to(logits.device),
+                logits
+            )
+            
+        if temperature > 0.0:
+            logits = logits / temperature
+            probs = torch.softmax(logits, dim=-1)
+            idx_next = torch.multinomial(probs, num_samples=1)
+            #dx = torch.cat((idx, idx_next), dim=-1)
+        else:
+            idx_next = torch.argmax(logits, dim=-1, keepdim=True)
+        if idx_next == eos_id:
+            break
+        idx = torch.cat((idx, idx_next), dim=1)
     return idx
 
 def text_to_token_ids(text, tokenizer):

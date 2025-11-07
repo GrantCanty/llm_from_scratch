@@ -2,7 +2,6 @@ import torch
 from torch.utils.data import Dataset, DataLoader
 import tiktoken
 
-test_str: str = "this is the string that i want to test on to gain a better understanding of how embedding works"
 
 class GPTDatasetV1(Dataset):
     def __init__(self, txt, tokenizer, max_length, stride):
