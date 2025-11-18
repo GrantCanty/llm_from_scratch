@@ -106,8 +106,10 @@ def generate_and_print_sample(model, tokenizer, device, start_context, max_new_t
     with torch.no_grad():
         token_ids = utils.generate_text_simple(model, idx=encoded, max_new_tokens=max_new_tokens, context_size=context_size, top_k=top_k, temperature=temperature)
         decoded_text = utils.token_ids_to_text(token_ids, tokenizer)
-        print(decoded_text.replace('\n', ' '))
+        #print(decoded_text.replace('\n', ' '))
     model.train()
+    t = decoded_text.replace('\n', ' ')
+    return t
 
 def assign(left, right):
     if left.shape != right.shape:

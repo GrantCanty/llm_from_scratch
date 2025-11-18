@@ -24,6 +24,7 @@ def calc_loss_loader(data_loader, model, device, num_batches=None):
     return total_loss/num_batches
 
 def generate_text_simple(model, idx, max_new_tokens, context_size, temperature=1.0, top_k=None, eos_id=None):
+    start_idx_len = len(idx.squeeze(0))
     for _ in range(max_new_tokens):
         idx_cond = idx[:, -context_size:]
         with torch.no_grad():
@@ -48,6 +49,8 @@ def generate_text_simple(model, idx, max_new_tokens, context_size, temperature=1
         if idx_next == eos_id:
             break
         idx = torch.cat((idx, idx_next), dim=1)
+    #idx = idx.squeeze(0)[start_idx_len:].unsqueeze(0)
+    idx = idx[:, start_idx_len:]
     return idx
 
 def text_to_token_ids(text, tokenizer):
