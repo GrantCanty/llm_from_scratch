@@ -10,7 +10,7 @@ class Decoder():
     def __init__(self, n_layers=12, emb_dim = 768, n_heads=12, tokenizer = tiktoken.get_encoding('gpt2')):
         torch.manual_seed(123)
 
-        GPT_CONFIG = {
+        self.GPT_CONFIG = {
             "vocab_size": 50257,
             "context_length": 1024,
             "emb_dim": emb_dim,
@@ -20,7 +20,7 @@ class Decoder():
             "qkv_bias": True
         }
 
-        self.decoder_model = model.GPTModel(GPT_CONFIG)
+        self.decoder_model = model.GPTModel(self.GPT_CONFIG)
         self.tokenizer = tokenizer
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         self.decoder_model.to(self.device)
@@ -62,3 +62,9 @@ class Decoder():
 
         optimizer = torch.optim.AdamW(self.decoder_model.parameters(), lr=0.0004, weight_decay=0.1)
         return model.train_model_simple_function(self.decoder_model, train_loader, val_loader, optimizer, self.device, num_epochs=num_epochs, eval_freq=eval_freq, eval_iter=eval_iter, start_context=start_context, tokenizer=self.tokenizer)
+
+    def save_weights(self):
+        torch.save(self.decoder_model.state_dict(), f"GPT_Model_embdim_{self.GPT_CONFIG['emb_dim']}_nlayers_{self.GPT_CONFIG['n_layers']}_nheads_{self.GPT_CONFIG['n_heads']}.pth")
+
+    def load_weights(self, path):
+        self.decoder_model.load_state_dict(torch.load(path, weights_only=True))
