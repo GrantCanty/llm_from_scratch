@@ -2,19 +2,26 @@ import torch
 import model
 import config
 import tiktoken
-from gpt_download import download_and_load_gpt2
 import embeddings
+from pathlib import Path
 
 
 class Decoder():
-    def __init__(self, param_count: int = 0, layer_count: int = 0, transformer_count: int = 0, tokenizer = tiktoken.get_encoding('gpt2')):
+    def __init__(self, n_layers=12, emb_dim = 768, n_heads=12, tokenizer = tiktoken.get_encoding('gpt2')):
         torch.manual_seed(123)
 
-        self.decoder_model = model.GPTModel(config.GPT_CONFIG_124M_INFER)
+        GPT_CONFIG = {
+            "vocab_size": 50257,
+            "context_length": 1024,
+            "emb_dim": emb_dim,
+            "n_heads": n_heads,
+            "n_layers": n_layers,
+            "drop_rate": 0.1,
+            "qkv_bias": True
+        }
+
+        self.decoder_model = model.GPTModel(GPT_CONFIG)
         self.tokenizer = tokenizer
-        
-        
-        #model.load_weights(self.decoder_model, params)
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         self.decoder_model.to(self.device)
     
@@ -22,8 +29,9 @@ class Decoder():
         return model.generate_and_print_sample(self.decoder_model, self.tokenizer, self.device, text, max_tokens, top_k, temperature)
 
 
-    def train(self, num_epochs=10, eval_freq=5, eval_iter=1, start_context="Every effort moves you"):
-        file_path = 'data/the-verdict.txt'
+    def train(self, num_epochs=10, eval_freq=5, eval_iter=1, start_context="Every effort moves you", drop_rate=0.1):
+        self.decoder_model.drop_emb =  torch.nn.Dropout(drop_rate)
+        file_path = Path('data', 'the-verdict.txt')
         with open(file_path, 'r', encoding='utf-8') as file:
             text_data = file.read()
         

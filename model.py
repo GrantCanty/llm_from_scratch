@@ -9,7 +9,7 @@ class GPTModel(torch.nn.Module):
         super().__init__()
         self.tok_emb = torch.nn.Embedding(cfg['vocab_size'], cfg['emb_dim'])
         self.pos_emb = torch.nn.Embedding(cfg['context_length'], cfg['emb_dim'])
-        self.drop_emb = torch.nn.Dropout(cfg['drop_rate'])
+        self.drop_emb = torch.nn.Dropout(0)
         self.trf_blocks = torch.nn.Sequential(
             *[transformer.TransformerBlock(cfg) for _ in range(cfg['n_layers'])])
         self.final_norm = LayerNorm(cfg['emb_dim'])
