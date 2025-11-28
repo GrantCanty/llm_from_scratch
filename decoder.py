@@ -41,7 +41,8 @@ class Decoder():
         val_data = text_data[split_idx:]
 
         train_loader = embeddings.create_dataloader_v1(
-        train_data,
+            train_data,
+            self.tokenizer,
             batch_size=2,
             max_length=config.GPT_CONFIG_124M_TRAIN['context_length'],
             stride=config.GPT_CONFIG_124M_TRAIN['context_length'],
@@ -52,6 +53,7 @@ class Decoder():
 
         val_loader = embeddings.create_dataloader_v1(
             val_data,
+            self.tokenizer,
             batch_size=2,
             max_length=config.GPT_CONFIG_124M_TRAIN['context_length'],
             stride=config.GPT_CONFIG_124M_TRAIN['context_length'],
@@ -61,7 +63,7 @@ class Decoder():
         )
 
         optimizer = torch.optim.AdamW(self.decoder_model.parameters(), lr=0.0004, weight_decay=0.1)
-        return model.train_model_simple_function(self.decoder_model, train_loader, val_loader, optimizer, self.device, num_epochs=num_epochs, eval_freq=eval_freq, eval_iter=eval_iter, start_context=start_context, tokenizer=self.tokenizer)
+        model.train_model_simple_function(self.decoder_model, train_loader, val_loader, optimizer, self.device, num_epochs=num_epochs, eval_freq=eval_freq, eval_iter=eval_iter, start_context=start_context, tokenizer=self.tokenizer)
 
     def save_weights(self):
         torch.save(self.decoder_model.state_dict(), f"GPT_Model_embdim_{self.GPT_CONFIG['emb_dim']}_nlayers_{self.GPT_CONFIG['n_layers']}_nheads_{self.GPT_CONFIG['n_heads']}.pth")
