@@ -1,6 +1,6 @@
 import torch
-import model
-import self_attention
+from . import model
+from . import self_attention
 
 
 class TransformerBlock(torch.nn.Module):

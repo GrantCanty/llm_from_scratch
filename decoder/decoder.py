@@ -1,18 +1,18 @@
 import torch
-import model
-import config
+from . import model
+# from . import config
 import tiktoken
-import embeddings
+from . import embeddings
 from pathlib import Path
 
 
 class Decoder():
-    def __init__(self, n_layers=12, emb_dim = 768, n_heads=12, tokenizer = tiktoken.get_encoding('gpt2')):
+    def __init__(self, n_layers=12, emb_dim = 768, n_heads=12, tokenizer = tiktoken.get_encoding('gpt2'), context_length = 256):
         torch.manual_seed(123)
 
         self.GPT_CONFIG = {
             "vocab_size": 50257,
-            "context_length": 1024,
+            "context_length": context_length,
             "emb_dim": emb_dim,
             "n_heads": n_heads,
             "n_layers": n_layers,
@@ -44,8 +44,8 @@ class Decoder():
             train_data,
             self.tokenizer,
             batch_size=2,
-            max_length=config.GPT_CONFIG_124M_TRAIN['context_length'],
-            stride=config.GPT_CONFIG_124M_TRAIN['context_length'],
+            max_length=self.GPT_CONFIG['context_length'],
+            stride=self.GPT_CONFIG['context_length'],
             drop_last=True,
             shuffle=True,
             num_workers=0
@@ -55,8 +55,8 @@ class Decoder():
             val_data,
             self.tokenizer,
             batch_size=2,
-            max_length=config.GPT_CONFIG_124M_TRAIN['context_length'],
-            stride=config.GPT_CONFIG_124M_TRAIN['context_length'],
+            max_length=self.GPT_CONFIG['context_length'],
+            stride=self.GPT_CONFIG['context_length'],
             drop_last=False,
             shuffle=False,
             num_workers=0

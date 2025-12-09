@@ -1,6 +1,6 @@
 import torch
-import transformer
-import utils
+from . import transformer
+from . import utils
 import numpy as np
 
 
