@@ -6,4 +6,4 @@ __all__ = [
     "Decoder"
 ]
 
-print("Initializing llm package...")
+print("Initializing decoder package...")

@@ -8,7 +8,7 @@ The project lets you create a decoder with the ability to change the following p
 * Embedding dimensions  
 
 The project has the following functions:  
-* `train(epoch_count, optional: eval_freq, optional: eval_iter, optional: start_context, optional: drop_rate)`  
+* `train(epoch_count, optional: eval_freq, optional: eval_iter, optional: start_context, optional: drop_rate, optional: content_length)`  
 * `generate(text, optional: max_tokens, optional: temperature, optional: top_k)`  
 * `save_weights`  
 * `load_weights(path)`  
@@ -20,4 +20,5 @@ import decoder
 
 model = decoder.Decoder()
 model.train(5, drop_rate=.25)
+model.generate('the black cat ate')
 ```
