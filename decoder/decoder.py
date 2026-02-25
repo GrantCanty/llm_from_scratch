@@ -29,17 +29,16 @@ class Decoder():
         return model.generate_and_print_sample(self.decoder_model, self.tokenizer, self.device, text, max_tokens, top_k, temperature)
 
 
-    def train(self, num_epochs=10, eval_freq=5, eval_iter=1, start_context="Every effort moves you", drop_rate=0.1):
+    def train(self, num_epochs=10, eval_freq=5, eval_iter=1, start_context="Every effort moves you", drop_rate=0.1, text_data=None):
         self.decoder_model.drop_emb =  torch.nn.Dropout(drop_rate)
 
-        current_dir = Path(__file__).parent
-        # print(f'current_dir: {current_dir}')
+        if text_data == None:
+            current_dir = Path(__file__).parent
+            data_path = current_dir.parent / "data" / "the-verdict.txt"
 
-        data_path = current_dir.parent / "data" / "the-verdict.txt"
-
-        # file_path = Path('data', 'the-verdict.txt')
-        with open(data_path, 'r', encoding='utf-8') as file:
-            text_data = file.read()
+            # file_path = Path('data', 'the-verdict.txt')
+            with open(data_path, 'r', encoding='utf-8') as file:
+                text_data = file.read()
         
         train_ratio = 0.9
         split_idx = int(train_ratio * len(text_data))
