@@ -31,8 +31,14 @@ class Decoder():
 
     def train(self, num_epochs=10, eval_freq=5, eval_iter=1, start_context="Every effort moves you", drop_rate=0.1):
         self.decoder_model.drop_emb =  torch.nn.Dropout(drop_rate)
-        file_path = Path('data', 'the-verdict.txt')
-        with open(file_path, 'r', encoding='utf-8') as file:
+
+        current_dir = Path(__file__).parent
+        # print(f'current_dir: {current_dir}')
+
+        data_path = current_dir.parent / "data" / "the-verdict.txt"
+
+        # file_path = Path('data', 'the-verdict.txt')
+        with open(data_path, 'r', encoding='utf-8') as file:
             text_data = file.read()
         
         train_ratio = 0.9
