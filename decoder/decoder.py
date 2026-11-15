@@ -1,6 +1,5 @@
 import torch
 from . import model
-# from . import config
 import tiktoken
 from . import embeddings
 from pathlib import Path
@@ -22,14 +21,14 @@ class Decoder():
 
         self.decoder_model = model.GPTModel(self.GPT_CONFIG)
         self.tokenizer = tokenizer
-        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        self.device = torch.device('cuda' if torch.cuda.is_available() else 'mps' if torch.mps.is_available() else 'cpu')
         self.decoder_model.to(self.device)
     
     def generate(self, text, max_tokens = 50, temperature = 1.2, top_k = 35):
         return model.generate_and_print_sample(self.decoder_model, self.tokenizer, self.device, text, max_tokens, top_k, temperature)
 
 
-    def train(self, num_epochs=10, eval_freq=5, eval_iter=1, start_context="Every effort moves you", drop_rate=0.1, text_data=None):
+    def train(self, num_epochs=10, eval_freq=5, eval_iter=1, start_context="Every effort moves you", drop_rate=0.1, learning_rate=0.0004, text_data=None):
         self.decoder_model.drop_emb =  torch.nn.Dropout(drop_rate)
 
         if text_data == None:
@@ -67,7 +66,7 @@ class Decoder():
             num_workers=0
         )
 
-        optimizer = torch.optim.AdamW(self.decoder_model.parameters(), lr=0.0004, weight_decay=0.1)
+        optimizer = torch.optim.AdamW(self.decoder_model.parameters(), lr=learning_rate, weight_decay=0.1)
         model.train_model_simple_function(self.decoder_model, train_loader, val_loader, optimizer, self.device, num_epochs=num_epochs, eval_freq=eval_freq, eval_iter=eval_iter, start_context=start_context, tokenizer=self.tokenizer)
 
     def save_weights(self):
