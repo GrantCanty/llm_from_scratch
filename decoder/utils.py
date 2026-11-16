@@ -21,7 +21,7 @@ def calc_loss_batch(input_batch, target_batch, model, device, attention_mask=Non
 
     targets = target_batch
     token_losses = F.cross_entropy(
-        logits.reshape(-1, logits.size(-1)),  # [8 * 256, 50257]
+        logits.float().reshape(-1, logits.size(-1)),  # [8 * 256, 50257]
         targets.reshape(-1),                # [8 * 256]
         ignore_index=-100,
         reduction="none",
@@ -30,7 +30,7 @@ def calc_loss_batch(input_batch, target_batch, model, device, attention_mask=Non
     counts = valid.sum(dim=0)
     loss_sums = token_losses.masked_fill(~valid, 0).sum(dim=0)
 
-    loss = torch.nn.functional.cross_entropy(logits.flatten(0, 1), target_batch.flatten(), ignore_index=-100)
+    loss = torch.nn.functional.cross_entropy(logits.float().flatten(0, 1), target_batch.flatten(), ignore_index=-100)
 
     if return_logits:
         return (loss, loss_sums, counts, logits)

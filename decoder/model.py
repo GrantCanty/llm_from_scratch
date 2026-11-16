@@ -8,6 +8,7 @@ import math
 class GPTModel(torch.nn.Module):
     def __init__(self, cfg):
         super().__init__()
+        self.attention_backend = cfg.get("attention_backend", "sdpa")
         self.tok_emb = torch.nn.Embedding(cfg['vocab_size'], cfg['emb_dim'])
         self.pos_emb = torch.nn.Embedding(cfg['context_length'], cfg['emb_dim'])
         self.drop_emb = torch.nn.Dropout(0)
@@ -19,6 +20,15 @@ class GPTModel(torch.nn.Module):
         )
     
     def forward(self, in_idx, attention_mask=None):
+        # Keep master parameters in FP32; autocast covers training, eval and generation.
+        if self.attention_backend == "fa4":
+            if in_idx.device.type != "cuda":
+                raise ValueError("The fa4 backend requires a CUDA device")
+            with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+                return self._forward(in_idx, attention_mask)
+        return self._forward(in_idx, attention_mask)
+
+    def _forward(self, in_idx, attention_mask=None):
         batch_size, seq_len = in_idx.shape
         if seq_len > self.pos_emb.num_embeddings:
             raise ValueError("Input sequence exceeds the model context length")

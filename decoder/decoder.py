@@ -4,7 +4,8 @@ from pathlib import Path
 
 
 class Decoder():
-    def __init__(self, n_layers=12, emb_dim = 768, n_heads=12, context_length = 256, seed=123):
+    def __init__(self, n_layers=12, emb_dim = 768, n_heads=12, context_length = 256, seed=123,
+                 attention_backend="sdpa", flash_attn_func=None):
         self.seed = seed
 
         self.GPT_CONFIG = {
@@ -14,7 +15,9 @@ class Decoder():
             "n_heads": n_heads,
             "n_layers": n_layers,
             "drop_rate": 0.1,
-            "qkv_bias": True
+            "qkv_bias": True,
+            "attention_backend": attention_backend,
+            "flash_attn_func": flash_attn_func
         }
 
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'mps' if torch.mps.is_available() else 'cpu')

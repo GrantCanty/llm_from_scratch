@@ -12,7 +12,9 @@ class TransformerBlock(torch.nn.Module):
             context_len=cfg['context_length'],
             num_heads=cfg['n_heads'],
             dropout=cfg['drop_rate'],
-            qkv_bias=cfg['qkv_bias'])
+            qkv_bias=cfg['qkv_bias'],
+            attention_backend=cfg.get('attention_backend', 'sdpa'),
+            flash_attn_func=cfg.get('flash_attn_func'))
         self.ff = model.FeedForward(cfg)
         self.norm1 = model.LayerNorm(cfg['emb_dim'])
         self.norm2 = model.LayerNorm(cfg['emb_dim'])

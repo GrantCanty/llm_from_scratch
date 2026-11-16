@@ -79,10 +79,17 @@ class MultiHeadedAttentionWrapper(torch.nn.Module):
 
 
 class MultiHeadedAttention(torch.nn.Module):
-    def __init__(self, d_in, d_out, context_len, dropout, num_heads, qkv_bias=False):
+    def __init__(self, d_in, d_out, context_len, dropout, num_heads, qkv_bias=False,
+                 attention_backend="sdpa", flash_attn_func=None):
         super().__init__()
         assert d_out % num_heads == 0, "d_out must be divisible by num_heads"
 
+        if attention_backend not in ("sdpa", "fa4"):
+            raise ValueError("attention_backend must be 'sdpa' or 'fa4'")
+        if attention_backend == "fa4" and not callable(flash_attn_func):
+            raise ValueError("Pass flash_attn_func=fa4.flash_attn_func for the fa4 backend")
+        self.attention_backend = attention_backend
+        self.flash_attn_func = flash_attn_func
         self.d_out = d_out
         self.num_heads = num_heads
         self.head_dim = d_out // num_heads
@@ -106,30 +113,44 @@ class MultiHeadedAttention(torch.nn.Module):
         values = values.view(b, num_tokens, self.num_heads, self.head_dim)
         queries = queries.view(b, num_tokens, self.num_heads, self.head_dim)
 
-        keys = keys.transpose(1, 2)
-        queries = queries.transpose(1, 2)
-        values = values.transpose(1, 2)
-
         if num_tokens > self.mask.size(0):
             raise ValueError("Input sequence exceeds the attention context length")
-
-        allowed = None
+        valid_keys = None
         if attention_mask is not None:
             if attention_mask.shape != (b, num_tokens):
                 raise ValueError("attention_mask must have shape [batch, tokens]")
-            # SDPA boolean masks use True for allowed attention positions.
-            causal = self.mask[:num_tokens, :num_tokens].bool()
             valid_keys = attention_mask.to(device=x.device, dtype=torch.bool)
-            allowed = causal[None, None, :, :] & valid_keys[:, None, None, :]
 
-        context_vec = torch.nn.functional.scaled_dot_product_attention(
-            queries, keys, values,
-            attn_mask=allowed,
-            is_causal=attention_mask is None,
-            # Functional SDPA applies dropout even in eval unless explicitly disabled.
-            dropout_p=self.dropout.p if self.training else 0.0,
-        ).transpose(1, 2)
+        dropout_p = self.dropout.p if self.training else 0.0
+        if self.attention_backend == "fa4":
+            if queries.device.type != "cuda" or queries.dtype not in (torch.float16, torch.bfloat16):
+                raise ValueError("FA4 requires CUDA and FP16/BF16 queries; use BF16 autocast")
+            context_vec = self._fa4_attention(queries, keys, values, valid_keys, dropout_p)
+        else:
+            allowed = None
+            if valid_keys is not None:
+                causal = self.mask[:num_tokens, :num_tokens].bool()
+                allowed = causal[None, None, :, :] & valid_keys[:, None, None, :]
+            context_vec = torch.nn.functional.scaled_dot_product_attention(
+                queries.transpose(1, 2), keys.transpose(1, 2), values.transpose(1, 2),
+                attn_mask=allowed,
+                is_causal=valid_keys is None,
+                dropout_p=dropout_p,
+            ).transpose(1, 2)
 
         context_vec = context_vec.contiguous().view(b, num_tokens, self.d_out)
         context_vec = self.out_proj(context_vec)
         return context_vec
+
+    def _fa4_attention(self, queries, keys, values, valid_keys, dropout_p):
+        # Dense causal attention is equivalent at valid positions for right padding.
+        # Padded query outputs are discarded through labels=-100 in the loss.
+        if valid_keys is not None:
+            right_padded = valid_keys[:, 0].all() & ~(~valid_keys[:, :-1] & valid_keys[:, 1:]).any()
+            if not right_padded:
+                raise ValueError("FA4 supports only nonempty, right-padded masks here")
+        output, _ = self.flash_attn_func(
+            queries.contiguous(), keys.contiguous(), values.contiguous(),
+            causal=True, dropout_p=dropout_p,
+        )
+        return output
