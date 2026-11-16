@@ -110,21 +110,25 @@ class MultiHeadedAttention(torch.nn.Module):
         queries = queries.transpose(1, 2)
         values = values.transpose(1, 2)
 
-        attn_scores = queries @ keys.transpose(2, 3)
-        mask_bool = ~self.mask.bool()[:num_tokens, :num_tokens]
+        if num_tokens > self.mask.size(0):
+            raise ValueError("Input sequence exceeds the attention context length")
 
-        attn_scores.masked_fill_(mask_bool, -torch.inf)
+        allowed = None
         if attention_mask is not None:
-            # Mask key positions; the causal mask still prevents future attention.
-            padding_mask = ~attention_mask.to(device=x.device, dtype=torch.bool)
-            attn_scores.masked_fill_(padding_mask[:, None, None, :], -torch.inf)
+            if attention_mask.shape != (b, num_tokens):
+                raise ValueError("attention_mask must have shape [batch, tokens]")
+            # SDPA boolean masks use True for allowed attention positions.
+            causal = self.mask[:num_tokens, :num_tokens].bool()
+            valid_keys = attention_mask.to(device=x.device, dtype=torch.bool)
+            allowed = causal[None, None, :, :] & valid_keys[:, None, None, :]
 
-        attn_weights = torch.softmax(
-            attn_scores / (keys.shape[-1]**0.5), dim=-1
-        )
-        attn_weights = self.dropout(attn_weights)
-
-        context_vec = (attn_weights @ values).transpose(1, 2)
+        context_vec = torch.nn.functional.scaled_dot_product_attention(
+            queries, keys, values,
+            attn_mask=allowed,
+            is_causal=attention_mask is None,
+            # Functional SDPA applies dropout even in eval unless explicitly disabled.
+            dropout_p=self.dropout.p if self.training else 0.0,
+        ).transpose(1, 2)
 
         context_vec = context_vec.contiguous().view(b, num_tokens, self.d_out)
         context_vec = self.out_proj(context_vec)
