@@ -109,12 +109,16 @@ def train_model_simple_function(model, train_loader, val_loader, optimizer, devi
 def evaluate_model(model, train_loader, val_loader, device, eval_iter):
     model.eval()
     with torch.no_grad():
-        train_loss = utils.calc_loss_loader(train_loader, model, device, num_batches=eval_iter)
+        train_metrics = utils.calc_loss_loader(train_loader, model, device, num_batches=eval_iter)
         val_metrics = utils.calc_metrics_loader(val_loader, model, device, num_batches=eval_iter)
-        val_loss = val_metrics["loss"]
-        val_perplexity = math.exp(val_loss)
     model.train()
-    return train_loss, val_loss, val_perplexity, val_metrics["accuracy"]
+
+    train_loss = train_metrics["loss"]
+    val_loss = val_metrics["loss"]
+    val_perplexity = math.exp(val_loss)
+    val_accuracy = val_metrics["accuracy"]
+
+    return train_loss, val_loss, val_perplexity, val_accuracy
 
 def generate_and_print_sample(model, tokenizer, device, start_context, max_new_tokens=15, top_k=25, temperature=1):
     model.eval()
