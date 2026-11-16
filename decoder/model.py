@@ -79,6 +79,7 @@ class FeedForward(torch.nn.Module):
 
 def train_model_simple_function(model, train_loader, val_loader, optimizer, device, num_epochs, eval_freq, eval_iter):
     train_losses, val_losses, val_perplexities, track_tokens_seen = [], [], [], []
+    train_loss_by_pos_list, val_loss_by_pos_list = [], []
     val_accuracies = []
     tokens_seen, global_step = 0, -1
 
@@ -94,7 +95,7 @@ def train_model_simple_function(model, train_loader, val_loader, optimizer, devi
             global_step += 1
 
             if global_step % eval_freq == 0:
-                train_loss, val_loss, val_perplexity, val_accuracy = evaluate_model(model, train_loader, val_loader, device, eval_iter)
+                train_loss, train_loss_by_pos, val_loss, val_loss_by_pos, val_perplexity, val_accuracy = evaluate_model(model, train_loader, val_loader, device, eval_iter)
                 
                 train_losses.append(train_loss)
                 val_losses.append(val_loss)
@@ -102,23 +103,31 @@ def train_model_simple_function(model, train_loader, val_loader, optimizer, devi
                 val_accuracies.append(val_accuracy)
 
                 track_tokens_seen.append(tokens_seen)
+
+                train_loss_by_pos_list.append(train_loss_by_pos.detach().cpu())
+
+                val_loss_by_pos_list.append(val_loss_by_pos.detach().cpu())
+
                 print(f'epoch {epoch+1} (step {global_step:06d})\ntrain_loss: {train_loss:.3f} val_loss: {val_loss:.3f} val_perplexity: {val_perplexity:.2f} val_accuracy: {val_accuracy:.2%}')
     
-    return train_losses, val_losses, val_perplexities, val_accuracies, track_tokens_seen
+    return train_losses, train_loss_by_pos_list, val_losses, val_loss_by_pos_list, val_perplexities, val_accuracies, track_tokens_seen
 
 def evaluate_model(model, train_loader, val_loader, device, eval_iter):
     model.eval()
     with torch.no_grad():
-        train_metrics = utils.calc_loss_loader(train_loader, model, device, num_batches=eval_iter)
+        train_loss = utils.calc_loss_loader(train_loader, model, device, num_batches=eval_iter)
         val_metrics = utils.calc_metrics_loader(val_loader, model, device, num_batches=eval_iter)
     model.train()
 
-    train_loss = train_metrics["loss"]
+    train_loss_by_pos = train_loss['loss_by_pos']
+    train_loss = train_loss['loss']
+
     val_loss = val_metrics["loss"]
+    val_loss_by_pos = val_metrics['loss_by_pos']
     val_perplexity = math.exp(val_loss)
     val_accuracy = val_metrics["accuracy"]
 
-    return train_loss, val_loss, val_perplexity, val_accuracy
+    return train_loss, train_loss_by_pos, val_loss, val_loss_by_pos, val_perplexity, val_accuracy
 
 def generate_and_print_sample(model, tokenizer, device, start_context, max_new_tokens=15, top_k=25, temperature=1):
     model.eval()

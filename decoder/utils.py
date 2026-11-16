@@ -1,4 +1,5 @@
 import torch
+import torch.nn.functional as F
 
 
 def unpack_batch(batch):
@@ -11,22 +12,50 @@ def unpack_batch(batch):
 
 def calc_loss_batch(input_batch, target_batch, model, device, attention_mask=None, return_logits=False):
     input_batch, target_batch = input_batch.to(device), target_batch.to(device)
+    
     if attention_mask is not None:
         attention_mask = attention_mask.to(device)
         logits = model(input_batch, attention_mask=attention_mask)
     else:
         logits = model(input_batch)
+
+    targets = target_batch
+    token_losses = F.cross_entropy(
+        logits.reshape(-1, logits.size(-1)),  # [8 * 256, 50257]
+        targets.reshape(-1),                # [8 * 256]
+        ignore_index=-100,
+        reduction="none",
+    ).reshape_as(targets)
+    valid = targets != -100
+    counts = valid.sum(dim=0)
+    loss_sums = token_losses.masked_fill(~valid, 0).sum(dim=0)
+
     loss = torch.nn.functional.cross_entropy(logits.flatten(0, 1), target_batch.flatten(), ignore_index=-100)
-    return (loss, logits) if return_logits else loss
+
+    if return_logits:
+        return (loss, loss_sums, counts, logits)
+    
+    return loss
 
 def calc_loss_loader(data_loader, model, device, num_batches=None):
-    return calc_metrics_loader(data_loader, model, device, num_batches)
+    metrics = calc_metrics_loader(data_loader, model, device, num_batches)
+    
+    tmp = {}
+    tmp['loss'] = metrics['loss']
+    tmp['loss_by_pos'] = metrics['loss_by_pos']
+
+    return tmp
 
 
 @torch.no_grad()
 def calc_metrics_loader(data_loader, model, device, num_batches=None):
     """Calculate token-weighted loss and accuracy; caller selects eval mode."""
     total_loss, total_correct, total_tokens = 0.0, 0, 0
+    context_length = model.pos_emb.num_embeddings
+
+    pos_loss_sums = torch.zeros(context_length, device=device)
+    pos_counts = torch.zeros(context_length, dtype=torch.long, device=device)
+    
     for i, batch in enumerate(data_loader):
         if num_batches is not None and i >= num_batches:
             break
@@ -36,14 +65,25 @@ def calc_metrics_loader(data_loader, model, device, num_batches=None):
         count = valid.sum().item()
         if count == 0:
             continue
-        loss, logits = calc_loss_batch(
+        loss, batch_pos_sums, batch_pos_counts, logits = calc_loss_batch(
             input_batch, targets, model, device, attention_mask, return_logits=True
         )
+        width = batch_pos_sums.size(0)
+
+        pos_loss_sums[:width] += batch_pos_sums
+        pos_counts[:width] += batch_pos_counts
+
         total_loss += loss.item() * count
         total_correct += ((logits.argmax(dim=-1) == targets) & valid).sum().item()
         total_tokens += count
+    
+    mean_loss_by_pos = pos_loss_sums / pos_counts.clamp_min(1)
+    
+    # Positions with no observations have no meaningful average.
+    mean_loss_by_pos[pos_counts == 0] = float("nan")
     return {
         "loss": total_loss / total_tokens if total_tokens else float('nan'),
+        "loss_by_pos": mean_loss_by_pos,
         "accuracy": total_correct / total_tokens if total_tokens else float('nan'),
     }
 
