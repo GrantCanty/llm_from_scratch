@@ -32,11 +32,8 @@ class Decoder():
             ("train_loader", train_loader),
             ("val_loader", val_loader),
         ):
-            if not isinstance(loader, DataLoader):
-                raise TypeError(f"{name} must be a torch.utils.data.DataLoader")
-
-            if len(loader) == 0:
-                raise ValueError(f"{name} has no batches")
+            if not hasattr(loader, '__iter__'):
+                raise TypeError(f"{name} must be an iterable")
 
         optimizer = torch.optim.AdamW(self.decoder_model.parameters(), lr=learning_rate, weight_decay=0.1)
         return model.train_model_simple_function(self.decoder_model, train_loader, val_loader, optimizer, self.device, num_epochs=num_epochs, eval_freq=eval_freq, eval_iter=eval_iter)
