@@ -4,8 +4,8 @@ from torch.utils.data import DataLoader
 
 
 class Decoder():
-    def __init__(self, n_layers=12, emb_dim = 768, n_heads=12, context_length = 256):
-        torch.manual_seed(123)
+    def __init__(self, n_layers=12, emb_dim = 768, n_heads=12, context_length = 256, seed=123):
+        self.seed = seed
 
         self.GPT_CONFIG = {
             "vocab_size": 50257,
@@ -17,9 +17,17 @@ class Decoder():
             "qkv_bias": True
         }
 
-        self.decoder_model = model.GPTModel(self.GPT_CONFIG)
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'mps' if torch.mps.is_available() else 'cpu')
-        self.decoder_model.to(self.device)
+        self.reset_weights()
+
+    def reset_weights(self, seed=None):
+        """Rebuild the model from scratch, using the constructor seed by default.
+
+        This replaces decoder_model; external optimizers must be recreated.
+        train() already creates a fresh optimizer for each call.
+        """
+        torch.manual_seed(self.seed if seed is None else seed)
+        self.decoder_model = model.GPTModel(self.GPT_CONFIG).to(self.device)
     
     def generate(self, text, tokenizer, max_tokens = 50, temperature = 1.2, top_k = 35):
         return model.generate_and_print_sample(self.decoder_model, tokenizer, self.device, text, max_tokens, top_k, temperature)
