@@ -1,12 +1,10 @@
 import torch
 from . import model
-import tiktoken
-from . import embeddings
-from pathlib import Path
+from torch.utils.data import DataLoader
 
 
 class Decoder():
-    def __init__(self, n_layers=12, emb_dim = 768, n_heads=12, tokenizer = tiktoken.get_encoding('gpt2'), context_length = 256):
+    def __init__(self, n_layers=12, emb_dim = 768, n_heads=12, context_length = 256):
         torch.manual_seed(123)
 
         self.GPT_CONFIG = {
@@ -20,7 +18,6 @@ class Decoder():
         }
 
         self.decoder_model = model.GPTModel(self.GPT_CONFIG)
-        self.tokenizer = tokenizer
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'mps' if torch.mps.is_available() else 'cpu')
         self.decoder_model.to(self.device)
     
@@ -28,46 +25,21 @@ class Decoder():
         return model.generate_and_print_sample(self.decoder_model, self.tokenizer, self.device, text, max_tokens, top_k, temperature)
 
 
-    def train(self, num_epochs=10, eval_freq=5, eval_iter=1, drop_rate=0.1, learning_rate=0.0004, text_data=None):
+    def train(self, train_loader, val_loader, num_epochs=10, eval_freq=5, eval_iter=1, drop_rate=0.1, learning_rate=0.0004):
         self.decoder_model.drop_emb =  torch.nn.Dropout(drop_rate)
 
-        if text_data == None:
-            current_dir = Path(__file__).parent
-            data_path = current_dir.parent / "data" / "the-verdict.txt"
+        for name, loader in (
+            ("train_loader", train_loader),
+            ("val_loader", val_loader),
+        ):
+            if not isinstance(loader, DataLoader):
+                raise TypeError(f"{name} must be a torch.utils.data.DataLoader")
 
-            # file_path = Path('data', 'the-verdict.txt')
-            with open(data_path, 'r', encoding='utf-8') as file:
-                text_data = file.read()
-        
-        train_ratio = 0.9
-        split_idx = int(train_ratio * len(text_data))
-        train_data = text_data[:split_idx]
-        val_data = text_data[split_idx:]
-
-        train_loader = embeddings.create_dataloader_v1(
-            train_data,
-            self.tokenizer,
-            batch_size=2,
-            max_length=self.GPT_CONFIG['context_length'],
-            stride=self.GPT_CONFIG['context_length'],
-            drop_last=True,
-            shuffle=True,
-            num_workers=0
-        )
-
-        val_loader = embeddings.create_dataloader_v1(
-            val_data,
-            self.tokenizer,
-            batch_size=2,
-            max_length=self.GPT_CONFIG['context_length'],
-            stride=self.GPT_CONFIG['context_length'],
-            drop_last=False,
-            shuffle=False,
-            num_workers=0
-        )
+            if len(loader) == 0:
+                raise ValueError(f"{name} has no batches")
 
         optimizer = torch.optim.AdamW(self.decoder_model.parameters(), lr=learning_rate, weight_decay=0.1)
-        model.train_model_simple_function(self.decoder_model, train_loader, val_loader, optimizer, self.device, num_epochs=num_epochs, eval_freq=eval_freq, eval_iter=eval_iter)
+        return model.train_model_simple_function(self.decoder_model, train_loader, val_loader, optimizer, self.device, num_epochs=num_epochs, eval_freq=eval_freq, eval_iter=eval_iter)
 
     def save_weights(self):
         torch.save(self.decoder_model.state_dict(), f"GPT_Model_embdim_{self.GPT_CONFIG['emb_dim']}_nlayers_{self.GPT_CONFIG['n_layers']}_nheads_{self.GPT_CONFIG['n_heads']}.pth")
