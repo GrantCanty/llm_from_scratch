@@ -8,6 +8,10 @@ from decoder.utils import calc_metrics_loader
 class MetricsTests(unittest.TestCase):
     def test_padding_is_ignored_and_batches_are_weighted_by_token_count(self):
         class FixedModel(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.pos_emb = torch.nn.Embedding(3, 1)
+
             def forward(self, ids):
                 return torch.nn.functional.one_hot(ids, num_classes=3).float() * 2
 
