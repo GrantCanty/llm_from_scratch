@@ -12,8 +12,13 @@ from decoder.self_attention import MultiHeadedAttention
 class FA4IntegrationTests(unittest.TestCase):
     def test_adapter_layout_padding_gradients_and_dropout_argument(self):
         calls = []
-        def fake_fa4(q, k, v, *, causal, dropout_p):
+        def fake_fa4(q, k, v, *, causal, dropout_p, dropout_seed=None):
             calls.append((q.shape, causal, dropout_p))
+            if dropout_p > 0:
+                self.assertIsInstance(dropout_seed, int)
+                self.assertTrue(0 <= dropout_seed < torch.iinfo(torch.int64).max)
+            else:
+                self.assertIsNone(dropout_seed)
             out = F.scaled_dot_product_attention(
                 q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2),
                 is_causal=causal, dropout_p=dropout_p,

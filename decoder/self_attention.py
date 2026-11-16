@@ -149,8 +149,16 @@ class MultiHeadedAttention(torch.nn.Module):
             right_padded = valid_keys[:, 0].all() & ~(~valid_keys[:, :-1] & valid_keys[:, 1:]).any()
             if not right_padded:
                 raise ValueError("FA4 supports only nonempty, right-padded masks here")
+        kwargs = {}
+        if dropout_p > 0:
+            # Some SM120 builds generate seeds with an overflowing high=2**63.
+            # Supply a fresh representable seed, also reproducible via manual_seed.
+            kwargs["dropout_seed"] = torch.randint(
+                0, torch.iinfo(torch.int64).max, (1,),
+                dtype=torch.int64, device="cpu",
+            ).item()
         output, _ = self.flash_attn_func(
             queries.contiguous(), keys.contiguous(), values.contiguous(),
-            causal=True, dropout_p=dropout_p,
+            causal=True, dropout_p=dropout_p, **kwargs,
         )
         return output
