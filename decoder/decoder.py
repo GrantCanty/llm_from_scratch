@@ -21,8 +21,8 @@ class Decoder():
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'mps' if torch.mps.is_available() else 'cpu')
         self.decoder_model.to(self.device)
     
-    def generate(self, text, max_tokens = 50, temperature = 1.2, top_k = 35):
-        return model.generate_and_print_sample(self.decoder_model, self.tokenizer, self.device, text, max_tokens, top_k, temperature)
+    def generate(self, text, tokenizer, max_tokens = 50, temperature = 1.2, top_k = 35):
+        return model.generate_and_print_sample(self.decoder_model, tokenizer, self.device, text, max_tokens, top_k, temperature)
 
 
     def train(self, train_loader, val_loader, num_epochs=10, eval_freq=5, eval_iter=1, drop_rate=0.1, learning_rate=0.0004):
