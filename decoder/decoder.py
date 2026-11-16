@@ -1,6 +1,6 @@
 import torch
 from . import model
-from torch.utils.data import DataLoader
+from pathlib import Path
 
 
 class Decoder():
@@ -46,8 +46,14 @@ class Decoder():
         optimizer = torch.optim.AdamW(self.decoder_model.parameters(), lr=learning_rate, weight_decay=0.1)
         return model.train_model_simple_function(self.decoder_model, train_loader, val_loader, optimizer, self.device, num_epochs=num_epochs, eval_freq=eval_freq, eval_iter=eval_iter)
 
-    def save_weights(self):
-        torch.save(self.decoder_model.state_dict(), f"GPT_Model_embdim_{self.GPT_CONFIG['emb_dim']}_nlayers_{self.GPT_CONFIG['n_layers']}_nheads_{self.GPT_CONFIG['n_heads']}.pth")
+    def save_weights(self, name=None):
+        name = f"GPT_Model_embdim_{self.GPT_CONFIG['emb_dim']}_nlayers_{self.GPT_CONFIG['n_layers']}_nheads_{self.GPT_CONFIG['n_heads']}.pth" if name == None else safe_file_name(name)
+        torch.save(self.decoder_model.state_dict(), name)
 
     def load_weights(self, path):
         self.decoder_model.load_state_dict(torch.load(path, weights_only=True))
+
+def safe_file_name(name):
+    if name is not None:
+        name = str(Path(name).with_suffix(".pth"))
+    return name
