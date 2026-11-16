@@ -2,6 +2,7 @@ import torch
 from . import transformer
 from . import utils
 import numpy as np
+import math
 
 
 class GPTModel(torch.nn.Module):
@@ -77,7 +78,7 @@ class FeedForward(torch.nn.Module):
     
 
 def train_model_simple_function(model, train_loader, val_loader, optimizer, device, num_epochs, eval_freq, eval_iter):
-    train_losses, val_losses, track_tokens_seen = [], [], []
+    train_losses, val_losses, val_perplexities, track_tokens_seen = [], [], [], []
     tokens_seen, global_step = 0, -1
 
     for epoch in range(num_epochs):
@@ -92,21 +93,25 @@ def train_model_simple_function(model, train_loader, val_loader, optimizer, devi
             global_step += 1
 
             if global_step % eval_freq == 0:
-                train_loss, val_loss = evaluate_model(model, train_loader, val_loader, device, eval_iter)
+                train_loss, val_loss, val_perplexity = evaluate_model(model, train_loader, val_loader, device, eval_iter)
+                
                 train_losses.append(train_loss)
                 val_losses.append(val_loss)
+                val_perplexities.append(val_perplexity)
+
                 track_tokens_seen.append(tokens_seen)
-                print(f'epoch {epoch+1} (step {global_step:06d})\ntrain_loss: {train_loss:.3f} val_loss: {val_loss:.3f}')
+                print(f'epoch {epoch+1} (step {global_step:06d})\ntrain_loss: {train_loss:.3f} val_loss: {val_loss:.3f} val_loss: {val_perplexity:.2f}')
     
-    return train_losses, val_losses, track_tokens_seen
+    return train_losses, val_losses, val_perplexities, track_tokens_seen
 
 def evaluate_model(model, train_loader, val_loader, device, eval_iter):
     model.eval()
     with torch.no_grad():
         train_loss = utils.calc_loss_loader(train_loader, model, device, num_batches=eval_iter)
         val_loss = utils.calc_loss_loader(val_loader, model, device, num_batches=eval_iter)
+        val_perplexity = math.exp(val_loss)
     model.train()
-    return train_loss, val_loss
+    return train_loss, val_loss, val_perplexity
 
 def generate_and_print_sample(model, tokenizer, device, start_context, max_new_tokens=15, top_k=25, temperature=1):
     model.eval()
