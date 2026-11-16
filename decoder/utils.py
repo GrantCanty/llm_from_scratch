@@ -1,10 +1,22 @@
 import torch
 
 
-def calc_loss_batch(input_batch, target_batch, model, device):
+def unpack_batch(batch):
+    """Accept notebook dictionaries and existing (inputs, targets) loaders."""
+    if isinstance(batch, dict):
+        return batch["input_ids"], batch["labels"], batch.get("attention_mask")
+    input_batch, target_batch = batch
+    return input_batch, target_batch, None
+
+
+def calc_loss_batch(input_batch, target_batch, model, device, attention_mask=None):
     input_batch, target_batch = input_batch.to(device), target_batch.to(device)
-    logits = model(input_batch)
-    loss = torch.nn.functional.cross_entropy(logits.flatten(0, 1), target_batch.flatten())
+    if attention_mask is not None:
+        attention_mask = attention_mask.to(device)
+        logits = model(input_batch, attention_mask=attention_mask)
+    else:
+        logits = model(input_batch)
+    loss = torch.nn.functional.cross_entropy(logits.flatten(0, 1), target_batch.flatten(), ignore_index=-100)
     return loss
 
 def calc_loss_loader(data_loader, model, device, num_batches=None):
@@ -15,9 +27,10 @@ def calc_loss_loader(data_loader, model, device, num_batches=None):
         num_batches = len(data_loader)
     else:
         num_batches = min(num_batches, len(data_loader))
-    for i, (input_batch, target_batch) in enumerate(data_loader):
+    for i, batch in enumerate(data_loader):
         if i < num_batches:
-            loss = calc_loss_batch(input_batch, target_batch, model, device)
+            input_batch, target_batch, attention_mask = unpack_batch(batch)
+            loss = calc_loss_batch(input_batch, target_batch, model, device, attention_mask)
             total_loss += loss.item()
         else:
             break

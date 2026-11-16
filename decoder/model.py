@@ -17,13 +17,22 @@ class GPTModel(torch.nn.Module):
             cfg['emb_dim'], cfg['vocab_size'], bias=False
         )
     
-    def forward(self, in_idx):
+    def forward(self, in_idx, attention_mask=None):
         batch_size, seq_len = in_idx.shape
+        if seq_len > self.pos_emb.num_embeddings:
+            raise ValueError("Input sequence exceeds the model context length")
+        if attention_mask is not None:
+            if attention_mask.shape != in_idx.shape:
+                raise ValueError("attention_mask must have the same shape as input IDs")
+            attention_mask = attention_mask.to(device=in_idx.device, dtype=torch.bool)
+            if not attention_mask[:, 0].all():
+                raise ValueError("Use nonempty, right-padded sequences")
         tok_embeds = self.tok_emb(in_idx)
         pos_embeds = self.pos_emb(torch.arange(seq_len, device=in_idx.device))
         x = tok_embeds + pos_embeds
         x = self.drop_emb(x)
-        x = self.trf_blocks(x)
+        for block in self.trf_blocks:
+            x = block(x, attention_mask=attention_mask)
         x = self.final_norm(x)
         logits = self.out_head(x)
         return logits
@@ -73,12 +82,13 @@ def train_model_simple_function(model, train_loader, val_loader, optimizer, devi
 
     for epoch in range(num_epochs):
         model.train()
-        for input_batch, target_batch, in train_loader:
+        for batch in train_loader:
+            input_batch, target_batch, attention_mask = utils.unpack_batch(batch)
             optimizer.zero_grad()
-            loss = utils.calc_loss_batch(input_batch, target_batch, model, device)
+            loss = utils.calc_loss_batch(input_batch, target_batch, model, device, attention_mask)
             loss.backward()
             optimizer.step()
-            tokens_seen += input_batch.numel()
+            tokens_seen += (target_batch != -100).sum().item()
             global_step += 1
 
             if global_step % eval_freq == 0:

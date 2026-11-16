@@ -96,7 +96,7 @@ class MultiHeadedAttention(torch.nn.Module):
             torch.tril(torch.ones(context_len, context_len), diagonal=0)
         )
     
-    def forward(self, x):
+    def forward(self, x, attention_mask=None):
         b, num_tokens, d_in = x.shape
         keys = self.W_key(x)
         queries = self.W_query(x)
@@ -114,6 +114,10 @@ class MultiHeadedAttention(torch.nn.Module):
         mask_bool = ~self.mask.bool()[:num_tokens, :num_tokens]
 
         attn_scores.masked_fill_(mask_bool, -torch.inf)
+        if attention_mask is not None:
+            # Mask key positions; the causal mask still prevents future attention.
+            padding_mask = ~attention_mask.to(device=x.device, dtype=torch.bool)
+            attn_scores.masked_fill_(padding_mask[:, None, None, :], -torch.inf)
 
         attn_weights = torch.softmax(
             attn_scores / (keys.shape[-1]**0.5), dim=-1
