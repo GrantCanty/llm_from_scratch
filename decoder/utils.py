@@ -9,7 +9,7 @@ def unpack_batch(batch):
     return input_batch, target_batch, None
 
 
-def calc_loss_batch(input_batch, target_batch, model, device, attention_mask=None):
+def calc_loss_batch(input_batch, target_batch, model, device, attention_mask=None, return_logits=False):
     input_batch, target_batch = input_batch.to(device), target_batch.to(device)
     if attention_mask is not None:
         attention_mask = attention_mask.to(device)
@@ -17,24 +17,35 @@ def calc_loss_batch(input_batch, target_batch, model, device, attention_mask=Non
     else:
         logits = model(input_batch)
     loss = torch.nn.functional.cross_entropy(logits.flatten(0, 1), target_batch.flatten(), ignore_index=-100)
-    return loss
+    return (loss, logits) if return_logits else loss
 
 def calc_loss_loader(data_loader, model, device, num_batches=None):
-    total_loss = 0
-    if len(data_loader) == 0:
-        return float('nan')
-    elif num_batches is None:
-        num_batches = len(data_loader)
-    else:
-        num_batches = min(num_batches, len(data_loader))
+    return calc_metrics_loader(data_loader, model, device, num_batches)
+
+
+@torch.no_grad()
+def calc_metrics_loader(data_loader, model, device, num_batches=None):
+    """Calculate token-weighted loss and accuracy; caller selects eval mode."""
+    total_loss, total_correct, total_tokens = 0.0, 0, 0
     for i, batch in enumerate(data_loader):
-        if i < num_batches:
-            input_batch, target_batch, attention_mask = unpack_batch(batch)
-            loss = calc_loss_batch(input_batch, target_batch, model, device, attention_mask)
-            total_loss += loss.item()
-        else:
+        if num_batches is not None and i >= num_batches:
             break
-    return total_loss/num_batches
+        input_batch, target_batch, attention_mask = unpack_batch(batch)
+        targets = target_batch.to(device)
+        valid = targets != -100
+        count = valid.sum().item()
+        if count == 0:
+            continue
+        loss, logits = calc_loss_batch(
+            input_batch, targets, model, device, attention_mask, return_logits=True
+        )
+        total_loss += loss.item() * count
+        total_correct += ((logits.argmax(dim=-1) == targets) & valid).sum().item()
+        total_tokens += count
+    return {
+        "loss": total_loss / total_tokens if total_tokens else float('nan'),
+        "accuracy": total_correct / total_tokens if total_tokens else float('nan'),
+    }
 
 def generate_text_simple(model, idx, max_new_tokens, context_size, temperature=1.0, top_k=None, eos_id=None):
     start_idx_len = len(idx.squeeze(0))

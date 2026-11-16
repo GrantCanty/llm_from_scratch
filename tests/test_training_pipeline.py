@@ -65,7 +65,8 @@ class TrainingPipelineTests(unittest.TestCase):
             losses = train_model_simple_function(model, loader, loader, optimizer,
                                                  'cpu', 1, 1, 1)
             self.assertTrue(torch.isfinite(torch.tensor(losses[0])).all())
-            self.assertEqual(losses[2], [4])
+            self.assertEqual(losses[3], [4])
+            self.assertTrue(0 <= losses[4][0] <= 1)
             self.assertTrue(torch.isfinite(torch.tensor(calc_loss_loader(loader, model, 'cpu'))))
 
 
