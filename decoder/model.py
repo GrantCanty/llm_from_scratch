@@ -104,7 +104,7 @@ def train_model_simple_function(model, train_loader, val_loader, optimizer, devi
                 track_tokens_seen.append(tokens_seen)
                 print(f'epoch {epoch+1} (step {global_step:06d})\ntrain_loss: {train_loss:.3f} val_loss: {val_loss:.3f} val_perplexity: {val_perplexity:.2f} val_accuracy: {val_accuracy:.2%}')
     
-    return train_losses, val_losses, val_perplexities, track_tokens_seen, val_accuracies
+    return train_losses, val_losses, val_perplexities, val_accuracies, track_tokens_seen
 
 def evaluate_model(model, train_loader, val_loader, device, eval_iter):
     model.eval()
