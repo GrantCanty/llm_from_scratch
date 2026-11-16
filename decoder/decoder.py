@@ -4,11 +4,12 @@ from pathlib import Path
 
 
 class Decoder():
-    def __init__(self, n_layers=12, emb_dim = 768, n_heads=12, seed=123):
+    def __init__(self, n_layers=12, emb_dim = 768, n_heads=12, context_length = 256, seed=123):
         self.seed = seed
 
         self.GPT_CONFIG = {
             "vocab_size": 50257,
+            "context_length": context_length,
             "emb_dim": emb_dim,
             "n_heads": n_heads,
             "n_layers": n_layers,
