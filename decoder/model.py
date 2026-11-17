@@ -3,6 +3,7 @@ from . import transformer
 from . import utils
 import numpy as np
 import math
+from numbers import Integral
 
 
 class GPTModel(torch.nn.Module):
@@ -105,7 +106,21 @@ class FeedForward(torch.nn.Module):
         return self.layers(x)
     
 
-def train_model_simple_function(model, train_loader, val_loader, optimizer, device, num_epochs, eval_freq, eval_iter):
+def train_model_simple_function(model, train_loader, val_loader, optimizer, device, num_epochs, eval_freq, eval_iter,
+                                *, warmup_steps=0, warmup_tokens=0, update_history=None):
+    """Linear warmup followed by constant LR; existing result tuple is preserved.
+
+    Warmup uses either optimizer updates or non-ignored targets. Each update uses
+    the LR at its ending progress (first update: peak / warmup_steps, or
+    peak * batch_scored_tokens / warmup_tokens). Empty-target batches do not
+    advance the schedule. A new call starts a new warmup from the supplied LRs.
+    """
+    for name, value in (("warmup_steps", warmup_steps), ("warmup_tokens", warmup_tokens)):
+        if isinstance(value, bool) or not isinstance(value, Integral) or value < 0:
+            raise ValueError(f"{name} must be a nonnegative integer")
+    if warmup_steps and warmup_tokens:
+        raise ValueError("Choose warmup_steps or warmup_tokens, not both")
+    peak_lrs = [group['lr'] for group in optimizer.param_groups]
     train_losses, val_losses, val_perplexities, track_tokens_seen = [], [], [], []
     train_loss_by_pos_list, val_loss_by_pos_list = [], []
     val_accuracies = []
@@ -115,7 +130,8 @@ def train_model_simple_function(model, train_loader, val_loader, optimizer, devi
         model.train()
         for batch in train_loader:
             input_batch, target_batch, attention_mask, document_ids, position_ids = utils.unpack_batch(batch)
-            if not (target_batch != -100).any():
+            scored_tokens = (target_batch != -100).sum().item()
+            if scored_tokens == 0:
                 continue
             optimizer.zero_grad()
             loss = utils.calc_loss_batch(input_batch, target_batch, model, device, attention_mask,
@@ -128,9 +144,22 @@ def train_model_simple_function(model, train_loader, val_loader, optimizer, devi
                 error_if_nonfinite=True
             )
 
+            factor = 1.0
+            if warmup_steps:
+                factor = min(1.0, (global_step + 2) / warmup_steps)
+            elif warmup_tokens:
+                factor = min(1.0, (tokens_seen + scored_tokens) / warmup_tokens)
+            for group, peak_lr in zip(optimizer.param_groups, peak_lrs):
+                group['lr'] = peak_lr * factor
             optimizer.step()
-            tokens_seen += (target_batch != -100).sum().item()
+            tokens_seen += scored_tokens
             global_step += 1
+            if update_history is not None:
+                update_history.append({
+                    'update': global_step + 1, 'scored_tokens': tokens_seen,
+                    'learning_rates': [group['lr'] for group in optimizer.param_groups],
+                    'grad_norm': grad_norm.item(), 'loss': loss.item(),
+                })
 
             if global_step % eval_freq == 0:
                 train_loss, train_loss_by_pos, val_loss, val_loss_by_pos, val_perplexity, val_accuracy = evaluate_model(model, train_loader, val_loader, device, eval_iter)
@@ -146,7 +175,7 @@ def train_model_simple_function(model, train_loader, val_loader, optimizer, devi
 
                 val_loss_by_pos_list.append(val_loss_by_pos.detach().cpu())
 
-                print(f'epoch {epoch+1} (step {global_step:06d})\ntrain_loss: {train_loss:.3f} val_loss: {val_loss:.3f} val_perplexity: {val_perplexity:.2f} val_accuracy: {val_accuracy:.2%} grad_norm: {grad_norm:.2f}')
+                print(f'epoch {epoch+1} (step {global_step:06d})\ntrain_loss: {train_loss:.3f} val_loss: {val_loss:.3f} val_perplexity: {val_perplexity:.2f} val_accuracy: {val_accuracy:.2%} grad_norm: {grad_norm:.2f} lr: {optimizer.param_groups[0]["lr"]:.3g}')
     
     return train_losses, train_loss_by_pos_list, val_losses, val_loss_by_pos_list, val_perplexities, val_accuracies, track_tokens_seen
 
