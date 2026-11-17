@@ -121,6 +121,13 @@ def train_model_simple_function(model, train_loader, val_loader, optimizer, devi
             loss = utils.calc_loss_batch(input_batch, target_batch, model, device, attention_mask,
                                          document_ids=document_ids, position_ids=position_ids)
             loss.backward()
+
+            grad_norm = torch.nn.utils.clip_grad_norm_(
+                model.parameters(),
+                max_norm=float("inf"),
+                error_if_nonfinite=True
+            )
+
             optimizer.step()
             tokens_seen += (target_batch != -100).sum().item()
             global_step += 1
@@ -139,7 +146,7 @@ def train_model_simple_function(model, train_loader, val_loader, optimizer, devi
 
                 val_loss_by_pos_list.append(val_loss_by_pos.detach().cpu())
 
-                print(f'epoch {epoch+1} (step {global_step:06d})\ntrain_loss: {train_loss:.3f} val_loss: {val_loss:.3f} val_perplexity: {val_perplexity:.2f} val_accuracy: {val_accuracy:.2%}')
+                print(f'epoch {epoch+1} (step {global_step:06d})\ntrain_loss: {train_loss:.3f} val_loss: {val_loss:.3f} val_perplexity: {val_perplexity:.2f} val_accuracy: {val_accuracy:.2%} grad_norm: {grad_norm:.2f}')
     
     return train_losses, train_loss_by_pos_list, val_losses, val_loss_by_pos_list, val_perplexities, val_accuracies, track_tokens_seen
 
