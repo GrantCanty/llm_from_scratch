@@ -1,5 +1,5 @@
 from itertools import product
-from .capacity import profile_training_configs
+from decoder.capacity import profile_training_configs
 
 candidates = [
     {"batch_size": batch, "context_length": context}
@@ -11,9 +11,6 @@ candidates = [
 
 def run(base_cfg, candidates, flash_attn_func, headroom_fraction=0.10):
     result = profile_training_configs(
-        base_cfg, candidates,
-        flash_attn_func=flash_attn_func,
-        headroom_fraction=headroom_fraction,
+        base_cfg, candidates, flash_attn_func, headroom_fraction,
     )
     print(result)
-    return result

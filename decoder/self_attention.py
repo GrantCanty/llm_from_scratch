@@ -103,7 +103,7 @@ class MultiHeadedAttention(torch.nn.Module):
             torch.tril(torch.ones(context_len, context_len), diagonal=0)
         )
     
-    def forward(self, x, attention_mask=None):
+    def forward(self, x, attention_mask=None, document_ids=None):
         b, num_tokens, d_in = x.shape
         keys = self.W_key(x)
         queries = self.W_query(x)
@@ -121,20 +121,30 @@ class MultiHeadedAttention(torch.nn.Module):
                 raise ValueError("attention_mask must have shape [batch, tokens]")
             valid_keys = attention_mask.to(device=x.device, dtype=torch.bool)
 
+        if document_ids is not None:
+            if document_ids.shape != (b, num_tokens):
+                raise ValueError("document_ids must have shape [batch, tokens]")
+            document_ids = document_ids.to(x.device)
         dropout_p = self.dropout.p if self.training else 0.0
         if self.attention_backend == "fa4":
             if queries.device.type != "cuda" or queries.dtype not in (torch.float16, torch.bfloat16):
                 raise ValueError("FA4 requires CUDA and FP16/BF16 queries; use BF16 autocast")
-            context_vec = self._fa4_attention(queries, keys, values, valid_keys, dropout_p)
+            context_vec = self._fa4_attention(queries, keys, values, valid_keys, dropout_p, document_ids)
         else:
             allowed = None
-            if valid_keys is not None:
+            if valid_keys is not None or document_ids is not None:
                 causal = self.mask[:num_tokens, :num_tokens].bool()
-                allowed = causal[None, None, :, :] & valid_keys[:, None, None, :]
+                allowed = causal[None, None, :, :]
+                if valid_keys is not None:
+                    allowed = allowed & valid_keys[:, None, None, :]
+                    if document_ids is not None:
+                        allowed = allowed & valid_keys[:, None, :, None]
+                if document_ids is not None:
+                    allowed = allowed & (document_ids[:, None, :, None] == document_ids[:, None, None, :])
             context_vec = torch.nn.functional.scaled_dot_product_attention(
                 queries.transpose(1, 2), keys.transpose(1, 2), values.transpose(1, 2),
                 attn_mask=allowed,
-                is_causal=valid_keys is None,
+                is_causal=allowed is None,
                 dropout_p=dropout_p,
             ).transpose(1, 2)
 
@@ -142,7 +152,26 @@ class MultiHeadedAttention(torch.nn.Module):
         context_vec = self.out_proj(context_vec)
         return context_vec
 
-    def _fa4_attention(self, queries, keys, values, valid_keys, dropout_p):
+    def _fa4_attention(self, queries, keys, values, valid_keys, dropout_p, document_ids=None):
+        if document_ids is not None:
+            # Use the existing dense kernel separately for each visible document.
+            # Never send a packed row containing multiple documents to that kernel.
+            outputs = []
+            for row in range(queries.size(0)):
+                valid = (valid_keys[row] if valid_keys is not None else
+                         torch.ones(queries.size(1), dtype=torch.bool, device=queries.device))
+                if not valid[0] or ((~valid[:-1]) & valid[1:]).any():
+                    raise ValueError("FA4 supports only nonempty, right-padded masks here")
+                length = int(valid.sum())
+                ids = document_ids[row, :length]
+                boundaries = [0] + (torch.nonzero(ids[1:] != ids[:-1]).flatten() + 1).tolist() + [length]
+                pieces = [self._fa4_attention(
+                    queries[row:row+1, start:end], keys[row:row+1, start:end],
+                    values[row:row+1, start:end], None, dropout_p)
+                    for start, end in zip(boundaries, boundaries[1:])]
+                pieces.append(queries[row:row+1, length:] * 0)
+                outputs.append(torch.cat(pieces, dim=1))
+            return torch.cat(outputs, dim=0)
         # Dense causal attention is equivalent at valid positions for right padding.
         # Padded query outputs are discarded through labels=-100 in the loss.
         if valid_keys is not None:

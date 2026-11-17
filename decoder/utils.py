@@ -5,19 +5,18 @@ import torch.nn.functional as F
 def unpack_batch(batch):
     """Accept notebook dictionaries and existing (inputs, targets) loaders."""
     if isinstance(batch, dict):
-        return batch["input_ids"], batch["labels"], batch.get("attention_mask")
+        return batch["input_ids"], batch["labels"], batch.get("attention_mask"), batch.get("document_ids"), batch.get("position_ids")
     input_batch, target_batch = batch
-    return input_batch, target_batch, None
+    return input_batch, target_batch, None, None, None
 
 
-def calc_loss_batch(input_batch, target_batch, model, device, attention_mask=None, return_logits=False):
+def calc_loss_batch(input_batch, target_batch, model, device, attention_mask=None, return_logits=False, document_ids=None, position_ids=None):
     input_batch, target_batch = input_batch.to(device), target_batch.to(device)
     
-    if attention_mask is not None:
-        attention_mask = attention_mask.to(device)
-        logits = model(input_batch, attention_mask=attention_mask)
-    else:
-        logits = model(input_batch)
+    kwargs = {name: value.to(device) for name, value in
+              (("attention_mask", attention_mask), ("document_ids", document_ids),
+               ("position_ids", position_ids)) if value is not None}
+    logits = model(input_batch, **kwargs)
 
     targets = target_batch
     token_losses = F.cross_entropy(
@@ -30,7 +29,13 @@ def calc_loss_batch(input_batch, target_batch, model, device, attention_mask=Non
     counts = valid.sum(dim=0)
     loss_sums = token_losses.masked_fill(~valid, 0).sum(dim=0)
 
-    loss = torch.nn.functional.cross_entropy(logits.float().flatten(0, 1), target_batch.flatten(), ignore_index=-100)
+    if position_ids is not None:
+        positions = position_ids.to(device)
+        counts = torch.zeros(model.pos_emb.num_embeddings, dtype=torch.long, device=device)
+        loss_sums = torch.zeros(model.pos_emb.num_embeddings, device=device)
+        counts.scatter_add_(0, positions.flatten(), valid.long().flatten())
+        loss_sums.scatter_add_(0, positions.flatten(), token_losses.flatten())
+    loss = token_losses.sum() / valid.sum().clamp_min(1)
 
     if return_logits:
         return (loss, loss_sums, counts, logits)
@@ -59,14 +64,15 @@ def calc_metrics_loader(data_loader, model, device, num_batches=None):
     for i, batch in enumerate(data_loader):
         if num_batches is not None and i >= num_batches:
             break
-        input_batch, target_batch, attention_mask = unpack_batch(batch)
+        input_batch, target_batch, attention_mask, document_ids, position_ids = unpack_batch(batch)
         targets = target_batch.to(device)
         valid = targets != -100
         count = valid.sum().item()
         if count == 0:
             continue
         loss, batch_pos_sums, batch_pos_counts, logits = calc_loss_batch(
-            input_batch, targets, model, device, attention_mask, return_logits=True
+            input_batch, targets, model, device, attention_mask, return_logits=True,
+            document_ids=document_ids, position_ids=position_ids
         )
         width = batch_pos_sums.size(0)
 
@@ -84,6 +90,8 @@ def calc_metrics_loader(data_loader, model, device, num_batches=None):
     return {
         "loss": total_loss / total_tokens if total_tokens else float('nan'),
         "loss_by_pos": mean_loss_by_pos,
+        "position_counts": pos_counts,
+        "scored_tokens": total_tokens,
         "accuracy": total_correct / total_tokens if total_tokens else float('nan'),
     }
 

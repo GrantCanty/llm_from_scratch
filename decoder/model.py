@@ -19,16 +19,16 @@ class GPTModel(torch.nn.Module):
             cfg['emb_dim'], cfg['vocab_size'], bias=False
         )
     
-    def forward(self, in_idx, attention_mask=None):
+    def forward(self, in_idx, attention_mask=None, document_ids=None, position_ids=None):
         # Keep master parameters in FP32; autocast covers training, eval and generation.
         if self.attention_backend == "fa4":
             if in_idx.device.type != "cuda":
                 raise ValueError("The fa4 backend requires a CUDA device")
             with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
-                return self._forward(in_idx, attention_mask)
-        return self._forward(in_idx, attention_mask)
+                return self._forward(in_idx, attention_mask, document_ids, position_ids)
+        return self._forward(in_idx, attention_mask, document_ids, position_ids)
 
-    def _forward(self, in_idx, attention_mask=None):
+    def _forward(self, in_idx, attention_mask=None, document_ids=None, position_ids=None):
         batch_size, seq_len = in_idx.shape
         if seq_len > self.pos_emb.num_embeddings:
             raise ValueError("Input sequence exceeds the model context length")
@@ -38,12 +38,30 @@ class GPTModel(torch.nn.Module):
             attention_mask = attention_mask.to(device=in_idx.device, dtype=torch.bool)
             if not attention_mask[:, 0].all():
                 raise ValueError("Use nonempty, right-padded sequences")
+        if document_ids is not None:
+            document_ids = document_ids.to(in_idx.device)
+            if document_ids.shape != in_idx.shape:
+                raise ValueError("document_ids must have the same shape as input IDs")
+            valid = attention_mask if attention_mask is not None else torch.ones_like(in_idx, dtype=torch.bool)
+            if (document_ids[valid] < 0).any() or ((document_ids[:, 1:] < document_ids[:, :-1]) & valid[:, 1:]).any():
+                raise ValueError("Valid document_ids must be nonnegative and nondecreasing")
+            offsets = torch.arange(seq_len, device=in_idx.device).expand_as(in_idx)
+            starts = torch.cat((torch.ones_like(in_idx[:, :1], dtype=torch.bool),
+                                document_ids[:, 1:] != document_ids[:, :-1]), dim=1)
+            expected = offsets - torch.where(starts, offsets, 0).cummax(1).values
+            expected = expected.masked_fill(~valid, 0)
+            if position_ids is not None and not torch.equal(position_ids.to(in_idx.device), expected):
+                raise ValueError("position_ids must reset at each visible document segment")
+            position_ids = expected
+        elif position_ids is None:
+            position_ids = torch.arange(seq_len, device=in_idx.device)
+        position_ids = position_ids.to(in_idx.device)
         tok_embeds = self.tok_emb(in_idx)
-        pos_embeds = self.pos_emb(torch.arange(seq_len, device=in_idx.device))
+        pos_embeds = self.pos_emb(position_ids)
         x = tok_embeds + pos_embeds
         x = self.drop_emb(x)
         for block in self.trf_blocks:
-            x = block(x, attention_mask=attention_mask)
+            x = block(x, attention_mask=attention_mask, document_ids=document_ids)
         x = self.final_norm(x)
         logits = self.out_head(x)
         return logits
@@ -96,9 +114,12 @@ def train_model_simple_function(model, train_loader, val_loader, optimizer, devi
     for epoch in range(num_epochs):
         model.train()
         for batch in train_loader:
-            input_batch, target_batch, attention_mask = utils.unpack_batch(batch)
+            input_batch, target_batch, attention_mask, document_ids, position_ids = utils.unpack_batch(batch)
+            if not (target_batch != -100).any():
+                continue
             optimizer.zero_grad()
-            loss = utils.calc_loss_batch(input_batch, target_batch, model, device, attention_mask)
+            loss = utils.calc_loss_batch(input_batch, target_batch, model, device, attention_mask,
+                                         document_ids=document_ids, position_ids=position_ids)
             loss.backward()
             optimizer.step()
             tokens_seen += (target_batch != -100).sum().item()

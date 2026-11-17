@@ -14,10 +14,10 @@ class TrainingPipelineTests(unittest.TestCase):
         self.collate = CausalLMCollator(4, 15)
 
     def test_shift_padding_and_context_bound(self):
-        batch = self.collate([{'input_ids': [1, 15, 2, 3, 4]},
-                              {'input_ids': [6, 15]}])
+        batch = self.collate([{'input_ids': [1, 15, 2, 3, 4], 'document_ids': [0, 0, 1, 1, 1]},
+                              {'input_ids': [6, 15], 'document_ids': [0, 0]}])
         self.assertEqual(batch['input_ids'].tolist(), [[1, 15, 2, 3], [6, 15, 15, 15]])
-        self.assertEqual(batch['labels'].tolist(), [[15, 2, 3, 4], [15, -100, -100, -100]])
+        self.assertEqual(batch['labels'].tolist(), [[15, -100, 3, 4], [15, -100, -100, -100]])
         self.assertEqual(batch['attention_mask'].tolist(), [[True]*4, [True, False, False, False]])
 
     def test_causal_and_padding_masks(self):
@@ -32,7 +32,7 @@ class TrainingPipelineTests(unittest.TestCase):
             model(torch.ones(1, 5, dtype=torch.long))
 
     def test_training_and_evaluation_for_both_batch_formats(self):
-        batch = self.collate([{'input_ids': [1, 2, 3, 15]}, {'input_ids': [4, 15]}])
+        batch = self.collate([{'input_ids': [1, 2, 3, 15], 'document_ids': [0]*4}, {'input_ids': [4, 15], 'document_ids': [0]*2}])
         for loader in ([batch], [(batch['input_ids'], batch['labels'])]):
             model = GPTModel(self.cfg)
             optimizer = torch.optim.AdamW(model.parameters(), lr=0.001)

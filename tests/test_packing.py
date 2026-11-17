@@ -38,7 +38,7 @@ class PackingTests(unittest.TestCase):
                          [[1, 15, 2, 15, 3], [3, 4, 5, 6, 7], [7, 15]])
         batch = CausalLMCollator(4, 15)(windows)
         self.assertEqual(batch['labels'].tolist(),
-                         [[15, 2, 15, 3], [4, 5, 6, 7], [15, -100, -100, -100]])
+                         [[15, -100, 15, -100], [4, 5, 6, 7], [15, -100, -100, -100]])
         self.assertEqual(batch['attention_mask'][0].tolist(), [True] * 4)
         self.assertEqual(batch['attention_mask'][2].tolist(), [True, False, False, False])
 
@@ -53,7 +53,7 @@ class PackingTests(unittest.TestCase):
             repeat = pack_dataset(data, ToyTokenizer(), 4, tokenization_batch_size=2, cache_dir=cache)
             self.assertEqual(list(repeat), expected)
             validation = pack_dataset(Dataset.from_dict({'text': ['13']}), ToyTokenizer(), 4, cache_dir=cache)
-            self.assertEqual(list(validation), [{'input_ids': [13, 15]}])
+            self.assertEqual(list(validation), [{'input_ids': [13, 15], 'document_ids': [0, 0]}])
 
     def test_real_tokenizer_preserves_document_stream(self):
         import tiktoken
@@ -74,7 +74,7 @@ class PackingTests(unittest.TestCase):
             for texts in [[], ['', '']]:
                 result = pack_dataset(Dataset.from_dict({'text': texts}), ToyTokenizer(), 4, cache_dir=cache)
                 self.assertEqual(len(result), 0)
-                self.assertEqual(result.column_names, ['input_ids'])
+                self.assertEqual(result.column_names, ['input_ids', 'document_ids'])
 
     def test_invalid_configuration_and_windows(self):
         for context in [0, -1, True, 1.5]:
@@ -94,5 +94,5 @@ class PackingTests(unittest.TestCase):
         optimizer = torch.optim.AdamW(model.parameters(), lr=.001)
         results = train_model_simple_function(model, loader, loader, optimizer, 'cpu', 1, 1, 2)
         self.assertTrue(torch.isfinite(torch.tensor(results[0])).all())
-        self.assertEqual(results[-1][-1], sum(len(row['input_ids']) - 1 for row in rows))
+        self.assertEqual(results[-1][-1], sum((CausalLMCollator(4, 15)([row])['labels'] != -100).sum().item() for row in rows))
         self.assertEqual(results[3][-1].shape, (4,))

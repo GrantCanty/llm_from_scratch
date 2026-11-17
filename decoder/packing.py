@@ -1,8 +1,11 @@
-"""Pack document token streams into shifted causal-language-model windows."""
+"""Pack documents with explicit boundaries for isolated causal attention."""
 from dataclasses import dataclass
 from numbers import Integral
 
 import torch
+
+
+PACKING_SCHEMA_VERSION = 2
 from torch.nn.utils.rnn import pad_sequence
 
 
@@ -16,14 +19,16 @@ def iter_packed_windows(documents, context_length, eot_id):
 
     Empty documents are skipped. Nonempty documents each receive one appended
     EOT, even when a window ends inside a document. Adjacent windows share one
-    token, so every adjacent pair in the concatenated stream is scored once.
+    token and its source document ID. The collator excludes cross-document
+    transitions from supervision.
     Only the final window can be short. A lone shared carry token has no new
     target and is not emitted. Documents are consumed in their supplied order.
     """
     _positive_integer(context_length, "context_length")
     window_size = context_length + 1
     buffer = []
-    for document in documents:
+    segments = []
+    for document_id, document in enumerate(documents):
         if len(document) == 0:
             continue
         tokens = list(document) + [eot_id]
@@ -31,16 +36,20 @@ def iter_packed_windows(documents, context_length, eot_id):
         while offset < len(tokens):
             take = min(window_size - len(buffer), len(tokens) - offset)
             buffer.extend(tokens[offset:offset + take])
+            segments.extend([document_id] * take)
             offset += take
             if len(buffer) == window_size:
-                yield {"input_ids": buffer}
+                yield {"input_ids": buffer, "document_ids": segments}
                 buffer = buffer[-1:]
+                segments = segments[-1:]
     if len(buffer) >= 2:
-        yield {"input_ids": buffer}
+        yield {"input_ids": buffer, "document_ids": segments}
 
 
 def _generate_packed_examples(dataset, tokenizer, context_length, eot_id,
-                              text_column, tokenization_batch_size):
+                              text_column, tokenization_batch_size, packing_schema_version):
+    if packing_schema_version != PACKING_SCHEMA_VERSION:
+        raise ValueError("Unsupported packing schema")
     def tokenized_documents():
         for batch in dataset.iter(batch_size=tokenization_batch_size):
             yield from tokenizer.encode_batch(batch[text_column], allowed_special="all")
@@ -58,7 +67,7 @@ def pack_dataset(dataset, tokenizer, context_length, *, text_column="text",
     calling if desired; this function does not introduce random ordering. The
     resulting map-style Dataset is disk-backed and works with ordinary loaders.
     Packing is sequential across tokenization batches, not a stateful map().
-    EOT does not impose a document-level attention barrier.
+    Document IDs are required by the collator to enforce attention isolation.
     """
     from datasets import Dataset, Features, Sequence, Value
 
@@ -68,9 +77,10 @@ def pack_dataset(dataset, tokenizer, context_length, *, text_column="text",
         raise ValueError(f"Dataset has no text column {text_column!r}")
     if eot_id is None:
         eot_id = tokenizer.eot_token
-    features = Features({"input_ids": Sequence(Value("int64"))})
+    features = Features({name: Sequence(Value("int64"))
+                         for name in ("input_ids", "document_ids")})
     if len(dataset) == 0:
-        return Dataset.from_dict({"input_ids": []}, features=features)
+        return Dataset.from_dict({name: [] for name in features}, features=features)
     try:
         return Dataset.from_generator(
             _generate_packed_examples,
@@ -81,6 +91,7 @@ def pack_dataset(dataset, tokenizer, context_length, *, text_column="text",
                 "context_length": int(context_length), "eot_id": int(eot_id),
                 "text_column": text_column,
                 "tokenization_batch_size": int(tokenization_batch_size),
+                "packing_schema_version": PACKING_SCHEMA_VERSION,
             },
         )
     except ValueError as exc:
@@ -88,7 +99,7 @@ def pack_dataset(dataset, tokenizer, context_length, *, text_column="text",
         # explicit features (e.g. a split consisting entirely of empty text).
         if 'corresponds to no data!' not in str(exc):
             raise
-        return Dataset.from_dict({"input_ids": []}, features=features)
+        return Dataset.from_dict({name: [] for name in features}, features=features)
 
 
 @dataclass(frozen=True)
@@ -104,10 +115,25 @@ class CausalLMCollator:
         seqs = [torch.tensor(item["input_ids"], dtype=torch.long) for item in batch]
         if not seqs or any(not 2 <= len(seq) <= self.context_length + 1 for seq in seqs):
             raise ValueError("Each window must contain 2 through context_length + 1 tokens")
+        if any("document_ids" not in item for item in batch):
+            raise ValueError("Packed rows require document_ids; regenerate legacy packed datasets")
+        docs = [torch.tensor(item["document_ids"], dtype=torch.long) for item in batch]
+        if any(d.shape != seq.shape or (d < 0).any() or (d[1:] < d[:-1]).any()
+               for d, seq in zip(docs, seqs)):
+            raise ValueError("document_ids must match tokens and be nonnegative and nondecreasing")
         inputs = [seq[:-1] for seq in seqs]
         targets = [seq[1:] for seq in seqs]
         input_ids = pad_sequence(inputs, batch_first=True, padding_value=self.pad_token_id)
+        targets = [t.masked_fill(d[:-1] != d[1:], -100) for t, d in zip(targets, docs)]
         labels = pad_sequence(targets, batch_first=True, padding_value=-100)
+        document_ids = pad_sequence([d[:-1] for d in docs], batch_first=True, padding_value=-1)
+        positions = []
+        for d in docs:
+            pos = torch.arange(len(d) - 1)
+            starts = torch.cat((torch.tensor([True]), d[1:-1] != d[:-2]))
+            positions.append(pos - torch.where(starts, pos, 0).cummax(0).values)
+        position_ids = pad_sequence(positions, batch_first=True, padding_value=0)
         lengths = torch.tensor([len(seq) for seq in inputs])
         attention_mask = torch.arange(input_ids.size(1))[None, :] < lengths[:, None]
-        return {"input_ids": input_ids, "attention_mask": attention_mask, "labels": labels}
+        return {"input_ids": input_ids, "attention_mask": attention_mask, "labels": labels,
+                "document_ids": document_ids, "position_ids": position_ids}

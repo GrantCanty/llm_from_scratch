@@ -26,6 +26,16 @@ def _run_trial(cfg, batch_size, device, warmup_steps, measured_steps, learning_r
     tokens = torch.randint(cfg['vocab_size'], (batch_size, cfg['context_length'] + 1), device=device)
     inputs, targets = tokens[:, :-1], tokens[:, 1:]
     mask = torch.ones_like(inputs, dtype=torch.bool)
+    # Exercise the packed-document path rather than measuring unrestricted attention.
+    segment_length = cfg.get('probe_document_length', max(1, cfg['context_length'] // 2))
+    if not isinstance(segment_length, int) or segment_length < 1:
+        raise ValueError('probe_document_length must be a positive integer')
+    offsets = torch.arange(cfg['context_length'] + 1, device=device)
+    docs = (offsets // segment_length).expand(batch_size, -1).clone()
+    docs[:, -1] = docs[:, -2]  # Final synthetic target acts as a within-document EOT.
+    document_ids = docs[:, :-1]
+    position_ids = (offsets[:-1] % segment_length).expand_as(inputs)
+    targets = targets.masked_fill(docs[:, :-1] != docs[:, 1:], -100)
     parameters = sum(p.numel() for p in model.parameters())
     # Include model allocation, first-use optimizer state, and warmup in peaks.
     for step in range(warmup_steps + measured_steps):
@@ -35,7 +45,8 @@ def _run_trial(cfg, batch_size, device, warmup_steps, measured_steps, learning_r
         optimizer.zero_grad(set_to_none=True)
         # Compare backends at the same precision, including the current loss helper.
         with torch.autocast(device_type='cuda', dtype=torch.bfloat16):
-            loss = calc_loss_batch(inputs, targets, model, device, mask)
+            loss = calc_loss_batch(inputs, targets, model, device, mask,
+                                   document_ids=document_ids, position_ids=position_ids)
         loss.backward()
         optimizer.step()
         del loss
@@ -45,7 +56,7 @@ def _run_trial(cfg, batch_size, device, warmup_steps, measured_steps, learning_r
         'status': 'ok',
         'parameters': parameters,
         'seconds_per_step': elapsed / measured_steps,
-        'tokens_per_second': batch_size * cfg['context_length'] * measured_steps / elapsed,
+        'tokens_per_second': (targets != -100).sum().item() * measured_steps / elapsed,
     }
 
 
@@ -98,6 +109,8 @@ def profile_training_configs(base_cfg, candidates, *, flash_attn_func=None,
                 'emb_dim': cfg['emb_dim'], 'n_heads': cfg['n_heads'],
                 'head_dim': cfg['emb_dim'] // cfg['n_heads'], 'n_layers': cfg['n_layers'],
                 'backend': cfg.get('attention_backend', 'sdpa'),
+                'document_isolation': True,
+                'probe_document_length': cfg.get('probe_document_length', max(1, cfg['context_length'] // 2)),
             }
             record.update(_try_trial(cfg, batch_size, device, warmup_steps,
                                      measured_steps, learning_rate, embedding_dropout))

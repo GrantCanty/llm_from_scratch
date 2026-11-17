@@ -71,3 +71,30 @@ class FA4IntegrationTests(unittest.TestCase):
                             for p in model.parameters()))
         model.eval()
         torch.testing.assert_close(model(ids, mask), model(ids, mask))
+
+    @unittest.skipUnless(torch.cuda.is_available(), 'Requires cloud CUDA GPU and FA4 installation')
+    def test_real_fa4_document_isolation_and_sdpa_parity(self):
+        fa4 = importlib.import_module('torch-cuda')
+        cfg = dict(vocab_size=32, context_length=256, emb_dim=128,
+                   n_heads=2, n_layers=2, drop_rate=0., qkv_bias=True)
+        reference = GPTModel(cfg).cuda().eval()
+        actual = GPTModel({**cfg, 'attention_backend': 'fa4',
+                           'flash_attn_func': fa4.flash_attn_func}).cuda().eval()
+        actual.load_state_dict(reference.state_dict())
+        ids = torch.randint(0, 32, (2, 256), device='cuda')
+        docs = torch.tensor([[0]*96 + [1]*160, [0]*80 + [1]*48 + [-1]*128], device='cuda')
+        mask = docs >= 0
+        with torch.autocast('cuda', dtype=torch.bfloat16):
+            expected = reference(ids, mask, document_ids=docs)
+        result = actual(ids, mask, document_ids=docs)
+        torch.testing.assert_close(result[mask], expected[mask], atol=.04, rtol=.04)
+        changed = ids.clone()
+        changed[:, :80] = (changed[:, :80] + 1) % 32
+        other = actual(changed, mask, document_ids=docs)
+        torch.testing.assert_close(result[docs == 1], other[docs == 1])
+        targets = torch.randint(0, 32, ids.shape, device='cuda').masked_fill(~mask, -100)
+        F.cross_entropy(result.float().flatten(0, 1), targets.flatten()).backward()
+        F.cross_entropy(expected.float().flatten(0, 1), targets.flatten()).backward()
+        for a, b in zip(actual.parameters(), reference.parameters()):
+            self.assertTrue(torch.isfinite(a.grad).all())
+            torch.testing.assert_close(a.grad, b.grad, atol=.004, rtol=.08)

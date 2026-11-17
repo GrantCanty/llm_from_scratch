@@ -20,10 +20,10 @@ class TransformerBlock(torch.nn.Module):
         self.norm2 = model.LayerNorm(cfg['emb_dim'])
         self.drop_shortcut = torch.nn.Dropout(cfg['drop_rate'])
     
-    def forward(self, x, attention_mask=None):
+    def forward(self, x, attention_mask=None, document_ids=None):
         shortcut = x
         x = self.norm1(x)
-        x = self.att(x, attention_mask=attention_mask)
+        x = self.att(x, attention_mask=attention_mask, document_ids=document_ids)
         x = self.drop_shortcut(x)
         x = x + shortcut
 
