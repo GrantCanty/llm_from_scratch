@@ -70,29 +70,28 @@ class GPTModel(torch.nn.Module):
         return logits
     
 
-class LayerNorm(torch.nn.Module):
+class LayerNorm(torch.nn.LayerNorm):
+    """Native LayerNorm with the baseline epsilon and legacy weight loading."""
+
     def __init__(self, emb_dim):
-        super().__init__()
-        self.eps = 1e-8
-        self.scale = torch.nn.Parameter(torch.ones(emb_dim))
-        self.shift = torch.nn.Parameter(torch.zeros(emb_dim))
+        super().__init__(emb_dim, eps=1e-8)
 
-    def forward(self, x):
-        mean = x.mean(dim=-1, keepdim=True)
-        var = x.var(dim=-1, keepdim=True, unbiased=False)
-        norm = (x - mean) / torch.sqrt(var + self.eps)
-        return self.scale * norm + self.shift
-    
+    def _load_from_state_dict(self, state_dict, prefix, *args, **kwargs):
+        # Earlier weight exports used scale/shift instead of weight/bias.
+        for old, new in (("scale", "weight"), ("shift", "bias")):
+            old_key, new_key = prefix + old, prefix + new
+            if old_key in state_dict:
+                if new_key not in state_dict:
+                    state_dict[new_key] = state_dict[old_key]
+                del state_dict[old_key]
+        super()._load_from_state_dict(state_dict, prefix, *args, **kwargs)
 
-class GELU(torch.nn.Module):
-    def __init__(self,):
-        super().__init__()
-    
-    def forward(self, x):
-        return 0.5 * x * (1 + torch.tanh(
-            torch.sqrt(torch.tensor(2/torch.pi)) * 
-            (x + 0.044715 * torch.pow(x, 3))
-        ))
+
+class GELU(torch.nn.GELU):
+    """Native GELU using the baseline tanh approximation."""
+
+    def __init__(self):
+        super().__init__(approximate="tanh")
 
 
 class FeedForward(torch.nn.Module):
@@ -215,7 +214,7 @@ def train_model_simple_function(model, train_loader, val_loader, optimizer, devi
                           if peak_allocated is not None else 'N/A (non-CUDA)')
                 print(f'last update: {tokens_per_second:,.0f} scored tokens/s | peak memory: {memory}')
     
-    return train_losses, train_loss_by_pos_list, val_losses, val_loss_by_pos_list, val_perplexities, val_accuracies, track_tokens_seen, max(peak_reserves)
+    return train_losses, train_loss_by_pos_list, val_losses, val_loss_by_pos_list, val_perplexities, val_accuracies, track_tokens_seen, max((peak for peak in peak_reserves if peak is not None), default=None)
 
 def evaluate_model(model, train_loader, val_loader, device, eval_iter):
     model.eval()
@@ -289,18 +288,18 @@ def load_weights(gpt, params):
         gpt.trf_blocks[b].ff.layers[2].bias = assign(
             gpt.trf_blocks[b].ff.layers[2].bias,
             params["blocks"][b]["mlp"]["c_proj"]["b"])
-        gpt.trf_blocks[b].norm1.scale = assign(
-            gpt.trf_blocks[b].norm1.scale,
+        gpt.trf_blocks[b].norm1.weight = assign(
+            gpt.trf_blocks[b].norm1.weight,
             params["blocks"][b]["ln_1"]["g"])
-        gpt.trf_blocks[b].norm1.shift = assign(
-            gpt.trf_blocks[b].norm1.shift,
+        gpt.trf_blocks[b].norm1.bias = assign(
+            gpt.trf_blocks[b].norm1.bias,
             params["blocks"][b]["ln_1"]["b"])
-        gpt.trf_blocks[b].norm2.scale = assign(
-            gpt.trf_blocks[b].norm2.scale,
+        gpt.trf_blocks[b].norm2.weight = assign(
+            gpt.trf_blocks[b].norm2.weight,
             params["blocks"][b]["ln_2"]["g"])
-        gpt.trf_blocks[b].norm2.shift = assign(
-            gpt.trf_blocks[b].norm2.shift,
+        gpt.trf_blocks[b].norm2.bias = assign(
+            gpt.trf_blocks[b].norm2.bias,
             params["blocks"][b]["ln_2"]["b"])
-    gpt.final_norm.scale = assign(gpt.final_norm.scale, params["g"])
-    gpt.final_norm.shift = assign(gpt.final_norm.shift, params["b"])
+    gpt.final_norm.weight = assign(gpt.final_norm.weight, params["g"])
+    gpt.final_norm.bias = assign(gpt.final_norm.bias, params["b"])
     gpt.out_head.weight = assign(gpt.out_head.weight, params["wte"])

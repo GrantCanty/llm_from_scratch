@@ -40,7 +40,7 @@ class WarmupTests(unittest.TestCase):
         self.assertEqual([row['scored_tokens'] for row in history], [1, 4, 5, 8])
         self.assertEqual([row['update'] for row in history], [1, 2, 3, 4])
         self.assertEqual([row['learning_rates'] for row in history], optimizer.used_lrs)
-        self.assertEqual(results[-1], [1, 4, 5, 8])
+        self.assertEqual(results[6], [1, 4, 5, 8])
         self.assertTrue(all(torch.isfinite(torch.tensor(row['grad_norm'])) for row in history))
         self.assertTrue(all(state['step'].item() == 4 for state in optimizer.state.values()))
 
