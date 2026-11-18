@@ -1,6 +1,7 @@
 import torch
 from . import transformer
 from . import utils
+from .update_metrics import snapshot_parameters, measure_updates
 import numpy as np
 import math
 import time
@@ -108,7 +109,7 @@ class FeedForward(torch.nn.Module):
     
 
 def train_model_simple_function(model, train_loader, val_loader, optimizer, device, num_epochs, eval_freq, eval_iter,
-                                *, warmup_steps=0, warmup_tokens=0, update_history=None):
+                                *, warmup_steps=0, warmup_tokens=0, update_history=None, update_norm_interval=100):
     """Linear warmup followed by constant LR; existing result tuple is preserved.
 
     Warmup uses either optimizer updates or non-ignored targets. Each update uses
@@ -121,10 +122,14 @@ def train_model_simple_function(model, train_loader, val_loader, optimizer, devi
             raise ValueError(f"{name} must be a nonnegative integer")
     if warmup_steps and warmup_tokens:
         raise ValueError("Choose warmup_steps or warmup_tokens, not both")
+    if (isinstance(update_norm_interval, bool) or
+            not isinstance(update_norm_interval, Integral) or update_norm_interval < 0):
+        raise ValueError("update_norm_interval must be a nonnegative integer")
     peak_lrs = [group['lr'] for group in optimizer.param_groups]
     train_losses, val_losses, val_perplexities, track_tokens_seen = [], [], [], []
     train_loss_by_pos_list, val_loss_by_pos_list = [], []
     val_accuracies = []
+    peak_reserves = []
     tokens_seen, global_step = 0, -1
     cuda_device = torch.device(device) if torch.device(device).type == 'cuda' else None
 
@@ -159,6 +164,10 @@ def train_model_simple_function(model, train_loader, val_loader, optimizer, devi
                 factor = min(1.0, (tokens_seen + scored_tokens) / warmup_tokens)
             for group, peak_lr in zip(optimizer.param_groups, peak_lrs):
                 group['lr'] = peak_lr * factor
+            sample_update = (update_history is not None and update_norm_interval > 0
+                             and ((global_step + 2) == 1 or
+                                  (global_step + 2) % update_norm_interval == 0))
+            snapshot = snapshot_parameters(model, optimizer) if sample_update else None
             optimizer.step()
             if cuda_device is not None:
                 torch.cuda.synchronize(cuda_device)
@@ -168,10 +177,13 @@ def train_model_simple_function(model, train_loader, val_loader, optimizer, devi
                               if cuda_device is not None else None)
             peak_reserved = (torch.cuda.max_memory_reserved(cuda_device)
                              if cuda_device is not None else None)
+            update_norms = measure_updates(snapshot, optimizer) if snapshot is not None else None
+            del snapshot
             tokens_seen += scored_tokens
             global_step += 1
             if update_history is not None:
                 update_history.append({
+                    'update_norms': update_norms,
                     'update': global_step + 1, 'scored_tokens': tokens_seen,
                     'learning_rates': [group['lr'] for group in optimizer.param_groups],
                     'grad_norm': grad_norm.item(), 'loss': loss.item(),
@@ -195,13 +207,15 @@ def train_model_simple_function(model, train_loader, val_loader, optimizer, devi
 
                 val_loss_by_pos_list.append(val_loss_by_pos.detach().cpu())
 
+                peak_reserves.append(peak_reserved)
+
                 print(f'epoch {epoch+1} (step {global_step:06d})\ntrain_loss: {train_loss:.3f} val_loss: {val_loss:.3f} val_perplexity: {val_perplexity:.2f} val_accuracy: {val_accuracy:.2%} grad_norm: {grad_norm:.2f} lr: {optimizer.param_groups[0]["lr"]:.3g}')
                 memory = (f'{peak_allocated / 2**30:.2f} GiB allocated, '
                           f'{peak_reserved / 2**30:.2f} GiB reserved'
                           if peak_allocated is not None else 'N/A (non-CUDA)')
                 print(f'last update: {tokens_per_second:,.0f} scored tokens/s | peak memory: {memory}')
     
-    return train_losses, train_loss_by_pos_list, val_losses, val_loss_by_pos_list, val_perplexities, val_accuracies, track_tokens_seen
+    return train_losses, train_loss_by_pos_list, val_losses, val_loss_by_pos_list, val_perplexities, val_accuracies, track_tokens_seen, max(peak_reserves)
 
 def evaluate_model(model, train_loader, val_loader, device, eval_iter):
     model.eval()

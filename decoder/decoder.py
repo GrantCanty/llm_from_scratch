@@ -37,14 +37,15 @@ class Decoder():
 
 
     def train(self, train_loader, val_loader, num_epochs=10, eval_freq=5, eval_iter=1, drop_rate=0.1, learning_rate=0.0004,
-              *, warmup_steps=0, warmup_tokens=0):
+              *, warmup_steps=0, warmup_tokens=0, update_norm_interval=100):
         """Train with optional linear warmup, then hold learning_rate constant.
 
         Select updates (warmup_steps) or scored targets (warmup_tokens).
         Each call creates a fresh optimizer and restarts the schedule/history.
         Per-update LR, token count, loss, gradient norm, scored tokens/second,
         elapsed seconds and CUDA peak allocated/reserved bytes are in
-        training_history. Timing excludes loading/evaluation; memory is None
+        training_history. Actual per-parameter update norms are sampled on update
+        1 and every update_norm_interval updates (0 disables). Timing excludes loading/evaluation; memory is None
         on non-CUDA devices. The return tuple is unchanged.
         """
         self.decoder_model.drop_emb =  torch.nn.Dropout(drop_rate)
@@ -60,7 +61,8 @@ class Decoder():
         optimizer = torch.optim.AdamW(self.decoder_model.parameters(), lr=learning_rate, weight_decay=0.1)
         return model.train_model_simple_function(self.decoder_model, train_loader, val_loader, optimizer, self.device, num_epochs=num_epochs, eval_freq=eval_freq, eval_iter=eval_iter,
                                                  warmup_steps=warmup_steps, warmup_tokens=warmup_tokens,
-                                                 update_history=self.training_history)
+                                                 update_history=self.training_history,
+                                                 update_norm_interval=update_norm_interval)
 
     def save_weights(self, name=None):
         name = f"GPT_Model_embdim_{self.GPT_CONFIG['emb_dim']}_nlayers_{self.GPT_CONFIG['n_layers']}_nheads_{self.GPT_CONFIG['n_heads']}.pth" if name == None else safe_file_name(name)
