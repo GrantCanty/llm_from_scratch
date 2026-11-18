@@ -5,6 +5,7 @@ import time
 import torch
 
 from .model import GPTModel
+from .optimizers import build_optimizer, optimizer_group_metadata
 from .utils import calc_loss_batch
 
 
@@ -18,11 +19,11 @@ def _validate(cfg, batch_size):
         raise ValueError('emb_dim must be divisible by n_heads')
 
 
-def _run_trial(cfg, batch_size, device, warmup_steps, measured_steps, learning_rate, embedding_dropout):
+def _run_trial(cfg, batch_size, device, warmup_steps, measured_steps, learning_rate, embedding_dropout, optimizer_options=None):
     # Everything owning tensors is local; do not return tensors or exceptions.
     model = GPTModel(cfg).to(device).train()
     model.drop_emb = torch.nn.Dropout(embedding_dropout)
-    optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate, weight_decay=0.1)
+    optimizer = build_optimizer(model, learning_rate=learning_rate, **(optimizer_options or {}))
     tokens = torch.randint(cfg['vocab_size'], (batch_size, cfg['context_length'] + 1), device=device)
     inputs, targets = tokens[:, :-1], tokens[:, 1:]
     mask = torch.ones_like(inputs, dtype=torch.bool)
@@ -54,6 +55,7 @@ def _run_trial(cfg, batch_size, device, warmup_steps, measured_steps, learning_r
     elapsed = time.perf_counter() - started
     return {
         'status': 'ok',
+        'optimizer_groups': optimizer_group_metadata(optimizer),
         'parameters': parameters,
         'seconds_per_step': elapsed / measured_steps,
         'tokens_per_second': (targets != -100).sum().item() * measured_steps / elapsed,
@@ -73,7 +75,7 @@ def _try_trial(*args, **kwargs):
 def profile_training_configs(base_cfg, candidates, *, flash_attn_func=None,
                              device='cuda', warmup_steps=2, measured_steps=3,
                              learning_rate=4e-4, embedding_dropout=.25,
-                             headroom_fraction=.1):
+                             headroom_fraction=.1, optimizer_options=None):
     """Return CPU-only records for candidate dicts containing batch_size and cfg overrides.
 
     Uses full-length, unpadded batches and the current training loss helper. This
@@ -113,7 +115,7 @@ def profile_training_configs(base_cfg, candidates, *, flash_attn_func=None,
                 'probe_document_length': cfg.get('probe_document_length', max(1, cfg['context_length'] // 2)),
             }
             record.update(_try_trial(cfg, batch_size, device, warmup_steps,
-                                     measured_steps, learning_rate, embedding_dropout))
+                                     measured_steps, learning_rate, embedding_dropout, optimizer_options))
             peak_reserved = torch.cuda.max_memory_reserved(device)
             estimated_free_at_peak = free_before - max(0, peak_reserved - reserved_before)
             record.update(

@@ -94,5 +94,5 @@ class PackingTests(unittest.TestCase):
         optimizer = torch.optim.AdamW(model.parameters(), lr=.001)
         results = train_model_simple_function(model, loader, loader, optimizer, 'cpu', 1, 1, 2)
         self.assertTrue(torch.isfinite(torch.tensor(results[0])).all())
-        self.assertEqual(results[-1][-1], sum((CausalLMCollator(4, 15)([row])['labels'] != -100).sum().item() for row in rows))
+        self.assertEqual(results[6][-1], sum((CausalLMCollator(4, 15)([row])['labels'] != -100).sum().item() for row in rows))
         self.assertEqual(results[3][-1].shape, (4,))

@@ -9,8 +9,9 @@ candidates = [
     )
 ]
 
-def run(base_cfg, candidates, flash_attn_func, headroom_fraction=0.10):
+def run(base_cfg, candidates, flash_attn_func, headroom_fraction=0.10, optimizer_options=None):
     result = profile_training_configs(
-        base_cfg, candidates, flash_attn_func, headroom_fraction,
+        base_cfg, candidates, flash_attn_func=flash_attn_func,
+        headroom_fraction=headroom_fraction, optimizer_options=optimizer_options,
     )
     print(result)

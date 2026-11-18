@@ -2,3 +2,4 @@ tiktoken
 torch
 numpy
 datasets
+matplotlib

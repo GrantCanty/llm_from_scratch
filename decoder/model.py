@@ -1,6 +1,7 @@
 import torch
 from . import transformer
 from . import utils
+from .optimizers import optimizer_group_metadata
 from .update_metrics import snapshot_parameters, measure_updates
 import numpy as np
 import math
@@ -184,6 +185,7 @@ def train_model_simple_function(model, train_loader, val_loader, optimizer, devi
                 update_history.append({
                     'update_norms': update_norms,
                     'update': global_step + 1, 'scored_tokens': tokens_seen,
+                    'optimizer_groups': optimizer_group_metadata(optimizer),
                     'learning_rates': [group['lr'] for group in optimizer.param_groups],
                     'grad_norm': grad_norm.item(), 'loss': loss.item(),
                     'step_seconds': step_seconds,
@@ -208,7 +210,10 @@ def train_model_simple_function(model, train_loader, val_loader, optimizer, devi
 
                 peak_reserves.append(peak_reserved)
 
-                print(f'epoch {epoch+1} (step {global_step:06d})\ntrain_loss: {train_loss:.3f} val_loss: {val_loss:.3f} val_perplexity: {val_perplexity:.2f} val_accuracy: {val_accuracy:.2%} grad_norm: {grad_norm:.2f} lr: {optimizer.param_groups[0]["lr"]:.3g}')
+                lr_summary = ', '.join(
+                    f"{group.get('optimizer_name', type(optimizer).__name__)}[{index}]={group['lr']:.3g}"
+                    for index, group in enumerate(optimizer.param_groups))
+                print(f'epoch {epoch+1} (step {global_step:06d})\ntrain_loss: {train_loss:.3f} val_loss: {val_loss:.3f} val_perplexity: {val_perplexity:.2f} val_accuracy: {val_accuracy:.2%} grad_norm: {grad_norm:.2f} lr: {lr_summary}')
                 memory = (f'{peak_allocated / 2**30:.2f} GiB allocated, '
                           f'{peak_reserved / 2**30:.2f} GiB reserved'
                           if peak_allocated is not None else 'N/A (non-CUDA)')

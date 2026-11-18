@@ -9,7 +9,8 @@ def snapshot_parameters(model, optimizer):
     names = {id(p): name for name, p in model.named_parameters()}
     return [
         (names[id(p)], p, p.detach().float().clone(), index,
-         group['lr'], group.get('weight_decay', 0.0))
+         group['lr'], group.get('weight_decay', 0.0),
+         group.get('optimizer_name', type(optimizer).__name__))
         for index, group in enumerate(optimizer.param_groups)
         for p in group['params']
         if id(p) in names and p.requires_grad and p.grad is not None
@@ -21,7 +22,7 @@ def measure_updates(snapshot, optimizer):
     """Return CPU scalars; denominator is the pre-step norm, including for decay."""
     parameters = {}
     weight_sq = update_sq = 0.0
-    for name, parameter, before, group, lr, decay in snapshot:
+    for name, parameter, before, group, lr, decay, optimizer_name in snapshot:
         weight_norm = torch.linalg.vector_norm(before).item()
         update_norm = torch.linalg.vector_norm(parameter.detach().float() - before).item()
         parameters[name] = {
@@ -29,7 +30,7 @@ def measure_updates(snapshot, optimizer):
             'update_norm': update_norm,
             'update_to_weight_ratio': update_norm / (weight_norm + 1e-12),
             'parameter_kind': 'matrix' if parameter.ndim >= 2 else 'bias_or_norm',
-            'optimizer': type(optimizer).__name__,
+            'optimizer': optimizer_name,
             'param_group': group,
             'learning_rate': lr,
             'weight_decay': decay,

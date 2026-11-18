@@ -1,5 +1,6 @@
 import torch
 from . import model
+from .optimizers import build_optimizer
 from pathlib import Path
 
 
@@ -37,9 +38,15 @@ class Decoder():
 
 
     def train(self, train_loader, val_loader, num_epochs=10, eval_freq=5, eval_iter=1, drop_rate=0.1, learning_rate=0.0004,
-              *, warmup_steps=0, warmup_tokens=0, update_norm_interval=100):
+              *, warmup_steps=0, warmup_tokens=0, update_norm_interval=100,
+              optimizer_type='adamw', weight_decay=.1, adamw_betas=(.9, .999),
+              muon_learning_rate=None, muon_weight_decay=.1, muon_momentum=.95,
+              muon_nesterov=True, muon_adjust_lr_fn='match_rms_adamw', muon_ns_steps=5):
         """Train with optional linear warmup, then hold learning_rate constant.
 
+        optimizer_type='muon' uses native Muon for hidden Linear matrices and
+        AdamW elsewhere. Default match_rms_adamw scaling uses learning_rate when
+        muon_learning_rate is omitted; other scaling requires an explicit LR.
         Select updates (warmup_steps) or scored targets (warmup_tokens).
         Each call creates a fresh optimizer and restarts the schedule/history.
         Per-update LR, token count, loss, gradient norm, scored tokens/second,
@@ -58,7 +65,12 @@ class Decoder():
                 raise TypeError(f"{name} must be an iterable")
 
         self.training_history = []
-        optimizer = torch.optim.AdamW(self.decoder_model.parameters(), lr=learning_rate, weight_decay=0.1)
+        optimizer = build_optimizer(
+            self.decoder_model, optimizer_type=optimizer_type, learning_rate=learning_rate,
+            weight_decay=weight_decay, adamw_betas=adamw_betas,
+            muon_learning_rate=muon_learning_rate, muon_weight_decay=muon_weight_decay,
+            muon_momentum=muon_momentum, muon_nesterov=muon_nesterov,
+            muon_adjust_lr_fn=muon_adjust_lr_fn, muon_ns_steps=muon_ns_steps)
         return model.train_model_simple_function(self.decoder_model, train_loader, val_loader, optimizer, self.device, num_epochs=num_epochs, eval_freq=eval_freq, eval_iter=eval_iter,
                                                  warmup_steps=warmup_steps, warmup_tokens=warmup_tokens,
                                                  update_history=self.training_history,
