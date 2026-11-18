@@ -3,6 +3,7 @@ from . import transformer
 from . import utils
 import numpy as np
 import math
+import time
 from numbers import Integral
 
 
@@ -125,6 +126,7 @@ def train_model_simple_function(model, train_loader, val_loader, optimizer, devi
     train_loss_by_pos_list, val_loss_by_pos_list = [], []
     val_accuracies = []
     tokens_seen, global_step = 0, -1
+    cuda_device = torch.device(device) if torch.device(device).type == 'cuda' else None
 
     for epoch in range(num_epochs):
         model.train()
@@ -133,6 +135,12 @@ def train_model_simple_function(model, train_loader, val_loader, optimizer, devi
             scored_tokens = (target_batch != -100).sum().item()
             if scored_tokens == 0:
                 continue
+            # Measure complete updates, excluding loader/evaluation time. Resetting
+            # peaks retains live allocations (weights, gradients, optimizer state).
+            if cuda_device is not None:
+                torch.cuda.synchronize(cuda_device)
+                torch.cuda.reset_peak_memory_stats(cuda_device)
+            step_start = time.perf_counter()
             optimizer.zero_grad()
             loss = utils.calc_loss_batch(input_batch, target_batch, model, device, attention_mask,
                                          document_ids=document_ids, position_ids=position_ids)
@@ -152,6 +160,14 @@ def train_model_simple_function(model, train_loader, val_loader, optimizer, devi
             for group, peak_lr in zip(optimizer.param_groups, peak_lrs):
                 group['lr'] = peak_lr * factor
             optimizer.step()
+            if cuda_device is not None:
+                torch.cuda.synchronize(cuda_device)
+            step_seconds = time.perf_counter() - step_start
+            tokens_per_second = scored_tokens / step_seconds
+            peak_allocated = (torch.cuda.max_memory_allocated(cuda_device)
+                              if cuda_device is not None else None)
+            peak_reserved = (torch.cuda.max_memory_reserved(cuda_device)
+                             if cuda_device is not None else None)
             tokens_seen += scored_tokens
             global_step += 1
             if update_history is not None:
@@ -159,6 +175,10 @@ def train_model_simple_function(model, train_loader, val_loader, optimizer, devi
                     'update': global_step + 1, 'scored_tokens': tokens_seen,
                     'learning_rates': [group['lr'] for group in optimizer.param_groups],
                     'grad_norm': grad_norm.item(), 'loss': loss.item(),
+                    'step_seconds': step_seconds,
+                    'tokens_per_second': tokens_per_second,
+                    'peak_memory_allocated_bytes': peak_allocated,
+                    'peak_memory_reserved_bytes': peak_reserved,
                 })
 
             if global_step % eval_freq == 0:
@@ -176,6 +196,10 @@ def train_model_simple_function(model, train_loader, val_loader, optimizer, devi
                 val_loss_by_pos_list.append(val_loss_by_pos.detach().cpu())
 
                 print(f'epoch {epoch+1} (step {global_step:06d})\ntrain_loss: {train_loss:.3f} val_loss: {val_loss:.3f} val_perplexity: {val_perplexity:.2f} val_accuracy: {val_accuracy:.2%} grad_norm: {grad_norm:.2f} lr: {optimizer.param_groups[0]["lr"]:.3g}')
+                memory = (f'{peak_allocated / 2**30:.2f} GiB allocated, '
+                          f'{peak_reserved / 2**30:.2f} GiB reserved'
+                          if peak_allocated is not None else 'N/A (non-CUDA)')
+                print(f'last update: {tokens_per_second:,.0f} scored tokens/s | peak memory: {memory}')
     
     return train_losses, train_loss_by_pos_list, val_losses, val_loss_by_pos_list, val_perplexities, val_accuracies, track_tokens_seen
 

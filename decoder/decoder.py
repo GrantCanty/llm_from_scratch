@@ -42,7 +42,10 @@ class Decoder():
 
         Select updates (warmup_steps) or scored targets (warmup_tokens).
         Each call creates a fresh optimizer and restarts the schedule/history.
-        Per-update LR, token count, loss and gradient norm are in training_history.
+        Per-update LR, token count, loss, gradient norm, scored tokens/second,
+        elapsed seconds and CUDA peak allocated/reserved bytes are in
+        training_history. Timing excludes loading/evaluation; memory is None
+        on non-CUDA devices. The return tuple is unchanged.
         """
         self.decoder_model.drop_emb =  torch.nn.Dropout(drop_rate)
 
