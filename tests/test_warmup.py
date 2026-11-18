@@ -1,4 +1,5 @@
 import unittest
+from unittest.mock import patch
 
 import torch
 
@@ -47,6 +48,17 @@ class WarmupTests(unittest.TestCase):
         optimizer, _, _ = self.run_training(warmup_tokens=5)
         expected = [[.0008, .0004], [.0032, .0016], [.004, .002], [.004, .002]]
         torch.testing.assert_close(torch.tensor(optimizer.used_lrs), torch.tensor(expected))
+
+    def test_update_measurements_count_scored_targets_and_skip_empty_batches(self):
+        # Four updates, each taking two seconds. Evaluation and empty batches
+        # must not consume timer samples or contribute scored tokens.
+        with patch('decoder.model.time.perf_counter', side_effect=range(0, 16, 2)):
+            _, history, _ = self.run_training()
+        self.assertEqual([row['step_seconds'] for row in history], [2.] * 4)
+        self.assertEqual([row['tokens_per_second'] for row in history], [.5, 1.5, .5, 1.5])
+        for row in history:
+            self.assertIsNone(row['peak_memory_allocated_bytes'])
+            self.assertIsNone(row['peak_memory_reserved_bytes'])
 
     def test_disabled_and_single_update_warmup_use_peak_lr(self):
         for kwargs in ({}, {'warmup_steps': 1}):
