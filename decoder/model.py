@@ -2,6 +2,7 @@ import torch
 from . import transformer
 from . import utils
 from .optimizers import optimizer_group_metadata
+from .checkpoint import rng_state, loader_generator_state
 from .training_controls import AdaptiveGradientClipper, scored_microbatch_groups, validate_accumulation_steps
 from .update_metrics import snapshot_parameters, measure_updates
 import numpy as np
@@ -112,7 +113,7 @@ class FeedForward(torch.nn.Module):
 def train_model_simple_function(model, train_loader, val_loader, optimizer, device, num_epochs, eval_freq, eval_iter,
                                 *, warmup_steps=0, warmup_tokens=0, update_history=None, update_norm_interval=100,
                                 accumulation_steps=1, adaptive_clip=False, clip_window=100,
-                                clip_multiplier=3., clip_min_history=20):
+                                clip_multiplier=3., clip_min_history=20, training_state=None):
     """Linear warmup followed by constant LR; existing result tuple is preserved.
 
     Warmup uses either optimizer updates or non-ignored targets. Each update uses
@@ -140,101 +141,133 @@ def train_model_simple_function(model, train_loader, val_loader, optimizer, devi
     peak_reserves = []
     tokens_seen, global_step = 0, -1
     cuda_device = torch.device(device) if torch.device(device).type == 'cuda' else None
+    if training_state is not None:
+        training_state.update(status='running', checkpoint_safe=True, updates=0,
+                              scored_tokens=0, microbatches_seen=0, epoch=0,
+                              epoch_complete=False, batches_consumed_epoch=0,
+                              warmup=dict(steps=warmup_steps, tokens=warmup_tokens,
+                                          peak_lrs=peak_lrs),
+                              adaptive_clipping=clipper.state_dict())
 
-    for epoch in range(num_epochs):
-        model.train()
-        for microbatches in scored_microbatch_groups(train_loader, accumulation_steps):
-            scored_tokens = sum(count for _, count in microbatches)
-            # Measure complete updates, excluding loader/evaluation time. Resetting
-            # peaks retains live allocations (weights, gradients, optimizer state).
-            if cuda_device is not None:
-                torch.cuda.synchronize(cuda_device)
-                torch.cuda.reset_peak_memory_stats(cuda_device)
-            step_start = time.perf_counter()
-            optimizer.zero_grad()
-            loss_value = 0.0
-            for unpacked, count in microbatches:
-                input_batch, target_batch, attention_mask, document_ids, position_ids = unpacked
-                loss = utils.calc_loss_batch(input_batch, target_batch, model, device, attention_mask,
-                                             document_ids=document_ids, position_ids=position_ids)
-                if not torch.isfinite(loss).item():
-                    raise FloatingPointError('Non-finite training loss; optimizer update aborted')
-                weight = count / scored_tokens
-                (loss * weight).backward()
-                loss_value += loss.detach().item() * weight
-                del loss
-            clipping = clipper.apply(model.parameters())
-            grad_norm = clipping['grad_norm']
+    # Release local snapshots/graphs even when a notebook retains a traceback.
+    # External optimizer ownership is unchanged for this lower-level API.
+    try:
+        for epoch in range(num_epochs):
+            model.train()
+            if training_state is not None:
+                training_state.update(epoch=epoch, epoch_complete=False, batches_consumed_epoch=0,
+                                      epoch_start_rng=rng_state(device),
+                                      epoch_start_loader_generators=loader_generator_state(train_loader))
+            for microbatches in scored_microbatch_groups(train_loader, accumulation_steps, training_state):
+                scored_tokens = sum(count for _, count in microbatches)
+                # Measure complete updates, excluding loader/evaluation time. Resetting
+                # peaks retains live allocations (weights, gradients, optimizer state).
+                if cuda_device is not None:
+                    torch.cuda.synchronize(cuda_device)
+                    torch.cuda.reset_peak_memory_stats(cuda_device)
+                step_start = time.perf_counter()
+                optimizer.zero_grad()
+                loss_value = 0.0
+                for unpacked, count in microbatches:
+                    input_batch, target_batch, attention_mask, document_ids, position_ids = unpacked
+                    loss = utils.calc_loss_batch(input_batch, target_batch, model, device, attention_mask,
+                                                 document_ids=document_ids, position_ids=position_ids)
+                    if not torch.isfinite(loss).item():
+                        raise FloatingPointError('Non-finite training loss; optimizer update aborted')
+                    weight = count / scored_tokens
+                    (loss * weight).backward()
+                    loss_value += loss.detach().item() * weight
+                    del loss
+                clipping = clipper.apply(model.parameters())
+                grad_norm = clipping['grad_norm']
 
-            factor = 1.0
-            if warmup_steps:
-                factor = min(1.0, (global_step + 2) / warmup_steps)
-            elif warmup_tokens:
-                factor = min(1.0, (tokens_seen + scored_tokens) / warmup_tokens)
-            for group, peak_lr in zip(optimizer.param_groups, peak_lrs):
-                group['lr'] = peak_lr * factor
-            sample_update = (update_history is not None and update_norm_interval > 0
-                             and ((global_step + 2) == 1 or
-                                  (global_step + 2) % update_norm_interval == 0))
-            snapshot = snapshot_parameters(model, optimizer) if sample_update else None
-            optimizer.step()
-            if cuda_device is not None:
-                torch.cuda.synchronize(cuda_device)
-            step_seconds = time.perf_counter() - step_start
-            tokens_per_second = scored_tokens / step_seconds
-            peak_allocated = (torch.cuda.max_memory_allocated(cuda_device)
-                              if cuda_device is not None else None)
-            peak_reserved = (torch.cuda.max_memory_reserved(cuda_device)
-                             if cuda_device is not None else None)
-            update_norms = measure_updates(snapshot, optimizer) if snapshot is not None else None
-            del snapshot
-            microbatches_seen += len(microbatches)
-            tokens_seen += scored_tokens
-            global_step += 1
-            if update_history is not None:
-                update_history.append({
-                    'update_norms': update_norms,
-                    'update': global_step + 1, 'scored_tokens': tokens_seen,
-                    'optimizer_groups': optimizer_group_metadata(optimizer),
-                    'learning_rates': [group['lr'] for group in optimizer.param_groups],
-                    **clipping, 'loss': loss_value,
-                    'microbatches': len(microbatches), 'microbatches_seen': microbatches_seen,
-                    'scored_tokens_per_update': scored_tokens,
-                    'accumulation_steps': accumulation_steps,
-                    'adaptive_clip': adaptive_clip, 'clip_window': clip_window,
-                    'clip_multiplier': clip_multiplier, 'clip_min_history': clip_min_history,
-                    'step_seconds': step_seconds,
-                    'tokens_per_second': tokens_per_second,
-                    'peak_memory_allocated_bytes': peak_allocated,
-                    'peak_memory_reserved_bytes': peak_reserved,
-                })
+                factor = 1.0
+                if warmup_steps:
+                    factor = min(1.0, (global_step + 2) / warmup_steps)
+                elif warmup_tokens:
+                    factor = min(1.0, (tokens_seen + scored_tokens) / warmup_tokens)
+                for group, peak_lr in zip(optimizer.param_groups, peak_lrs):
+                    group['lr'] = peak_lr * factor
+                sample_update = (update_history is not None and update_norm_interval > 0
+                                 and ((global_step + 2) == 1 or
+                                      (global_step + 2) % update_norm_interval == 0))
+                snapshot = snapshot_parameters(model, optimizer) if sample_update else None
+                optimizer.step()
+                if training_state is not None:
+                    training_state.update(checkpoint_safe=True, updates=global_step + 2,
+                                          scored_tokens=tokens_seen + scored_tokens,
+                                          microbatches_seen=microbatches_seen + len(microbatches),
+                                          adaptive_clipping=clipper.state_dict(),
+                                          loader_generators=loader_generator_state(train_loader))
+                if cuda_device is not None:
+                    torch.cuda.synchronize(cuda_device)
+                step_seconds = time.perf_counter() - step_start
+                tokens_per_second = scored_tokens / step_seconds
+                peak_allocated = (torch.cuda.max_memory_allocated(cuda_device)
+                                  if cuda_device is not None else None)
+                peak_reserved = (torch.cuda.max_memory_reserved(cuda_device)
+                                 if cuda_device is not None else None)
+                update_norms = measure_updates(snapshot, optimizer) if snapshot is not None else None
+                del snapshot
+                microbatches_seen += len(microbatches)
+                tokens_seen += scored_tokens
+                global_step += 1
+                if update_history is not None:
+                    update_history.append({
+                        'update_norms': update_norms,
+                        'update': global_step + 1, 'scored_tokens': tokens_seen,
+                        'optimizer_groups': optimizer_group_metadata(optimizer),
+                        'learning_rates': [group['lr'] for group in optimizer.param_groups],
+                        **clipping, 'loss': loss_value,
+                        'microbatches': len(microbatches), 'microbatches_seen': microbatches_seen,
+                        'scored_tokens_per_update': scored_tokens,
+                        'accumulation_steps': accumulation_steps,
+                        'adaptive_clip': adaptive_clip, 'clip_window': clip_window,
+                        'clip_multiplier': clip_multiplier, 'clip_min_history': clip_min_history,
+                        'step_seconds': step_seconds,
+                        'tokens_per_second': tokens_per_second,
+                        'peak_memory_allocated_bytes': peak_allocated,
+                        'peak_memory_reserved_bytes': peak_reserved,
+                    })
 
-            if global_step % eval_freq == 0:
-                train_loss, train_loss_by_pos, val_loss, val_loss_by_pos, val_perplexity, val_accuracy = evaluate_model(model, train_loader, val_loader, device, eval_iter)
-                
-                train_losses.append(train_loss)
-                val_losses.append(val_loss)
-                val_perplexities.append(val_perplexity)
-                val_accuracies.append(val_accuracy)
+                if global_step % eval_freq == 0:
+                    train_loss, train_loss_by_pos, val_loss, val_loss_by_pos, val_perplexity, val_accuracy = evaluate_model(model, train_loader, val_loader, device, eval_iter)
 
-                track_tokens_seen.append(tokens_seen)
+                    train_losses.append(train_loss)
+                    val_losses.append(val_loss)
+                    val_perplexities.append(val_perplexity)
+                    val_accuracies.append(val_accuracy)
 
-                train_loss_by_pos_list.append(train_loss_by_pos.detach().cpu())
+                    track_tokens_seen.append(tokens_seen)
 
-                val_loss_by_pos_list.append(val_loss_by_pos.detach().cpu())
+                    train_loss_by_pos_list.append(train_loss_by_pos.detach().cpu())
 
-                peak_reserves.append(peak_reserved)
+                    val_loss_by_pos_list.append(val_loss_by_pos.detach().cpu())
 
-                lr_summary = ', '.join(
-                    f"{group.get('optimizer_name', type(optimizer).__name__)}[{index}]={group['lr']:.3g}"
-                    for index, group in enumerate(optimizer.param_groups))
-                print(f'epoch {epoch+1} (step {global_step:06d})\ntrain_loss: {train_loss:.3f} val_loss: {val_loss:.3f} val_perplexity: {val_perplexity:.2f} val_accuracy: {val_accuracy:.2%} grad_norm: {grad_norm:.2f} clip_factor: {clipping["clip_factor"]:.3f} lr: {lr_summary}')
-                memory = (f'{peak_allocated / 2**30:.2f} GiB allocated, '
-                          f'{peak_reserved / 2**30:.2f} GiB reserved'
-                          if peak_allocated is not None else 'N/A (non-CUDA)')
-                print(f'last update: {tokens_per_second:,.0f} scored tokens/s | peak memory: {memory}')
-    
-    return train_losses, train_loss_by_pos_list, val_losses, val_loss_by_pos_list, val_perplexities, val_accuracies, track_tokens_seen, max((peak for peak in peak_reserves if peak is not None), default=None)
+                    peak_reserves.append(peak_reserved)
+
+                    lr_summary = ', '.join(
+                        f"{group.get('optimizer_name', type(optimizer).__name__)}[{index}]={group['lr']:.3g}"
+                        for index, group in enumerate(optimizer.param_groups))
+                    print(f'epoch {epoch+1} (step {global_step:06d})\ntrain_loss: {train_loss:.3f} val_loss: {val_loss:.3f} val_perplexity: {val_perplexity:.2f} val_accuracy: {val_accuracy:.2%} grad_norm: {grad_norm:.2f} clip_factor: {clipping["clip_factor"]:.3f} lr: {lr_summary}')
+                    memory = (f'{peak_allocated / 2**30:.2f} GiB allocated, '
+                              f'{peak_reserved / 2**30:.2f} GiB reserved'
+                              if peak_allocated is not None else 'N/A (non-CUDA)')
+                    print(f'last update: {tokens_per_second:,.0f} scored tokens/s | peak memory: {memory}')
+
+            if training_state is not None:
+                training_state.update(epoch_complete=True, checkpoint_safe=True,
+                                      loader_generators=loader_generator_state(train_loader))
+        if training_state is not None:
+            training_state['status'] = 'complete'
+        return train_losses, train_loss_by_pos_list, val_losses, val_loss_by_pos_list, val_perplexities, val_accuracies, track_tokens_seen, max((peak for peak in peak_reserves if peak is not None), default=None)
+    finally:
+        if training_state is not None:
+            training_state['loader_generators'] = loader_generator_state(train_loader)
+        loss = snapshot = microbatches = unpacked = None
+        input_batch = target_batch = attention_mask = document_ids = position_ids = None
+        train_loss_by_pos = val_loss_by_pos = None
+
 
 def evaluate_model(model, train_loader, val_loader, device, eval_iter):
     model.eval()

@@ -13,7 +13,7 @@ def validate_accumulation_steps(value):
         raise ValueError('accumulation_steps must be a positive integer')
 
 
-def scored_microbatch_groups(loader, accumulation_steps):
+def scored_microbatch_groups(loader, accumulation_steps, progress=None):
     """Buffer input batches only, never activation graphs; flush each epoch tail.
 
     Count valid targets before forward so each backward can use its exact share
@@ -21,6 +21,9 @@ def scored_microbatch_groups(loader, accumulation_steps):
     """
     group = []
     for batch in loader:
+        if progress is not None:
+            progress['batches_consumed_epoch'] += 1
+            progress['checkpoint_safe'] = False
         unpacked = unpack_batch(batch)
         count = (unpacked[1] != -100).sum().item()
         if not count:
@@ -71,3 +74,9 @@ class AdaptiveGradientClipper:
                     clip_threshold=threshold, clip_baseline=baseline,
                     clip_factor=factor, was_clipped=factor < 1.,
                     clipping_fraction=self.clipped_updates / self.updates)
+
+    def state_dict(self):
+        return dict(enabled=self.enabled, window=self.norms.maxlen,
+                    multiplier=self.multiplier, min_history=self.min_history,
+                    norms=list(self.norms), updates=self.updates,
+                    clipped_updates=self.clipped_updates)
