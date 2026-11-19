@@ -67,8 +67,10 @@ class MuonTests(unittest.TestCase):
         history = []
         train_model_simple_function(model, [batch, batch], [batch], optimizer,
                                     'cuda', 1, 100, 1, update_history=history,
+                                    accumulation_steps=2, adaptive_clip=True, clip_min_history=1,
                                     update_norm_interval=1)
-        self.assertEqual(len(history), 2)
+        self.assertEqual(len(history), 1)
+        self.assertEqual(history[0]["microbatches"], 2)
         self.assertTrue(all(torch.isfinite(p).all() for p in model.parameters()))
 
     def test_loop_warms_both_groups_and_skips_empty_batches(self):

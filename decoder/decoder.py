@@ -41,12 +41,18 @@ class Decoder():
               *, warmup_steps=0, warmup_tokens=0, update_norm_interval=100,
               optimizer_type='adamw', weight_decay=.1, adamw_betas=(.9, .999),
               muon_learning_rate=None, muon_weight_decay=.1, muon_momentum=.95,
-              muon_nesterov=True, muon_adjust_lr_fn='match_rms_adamw', muon_ns_steps=5):
+              muon_nesterov=True, muon_adjust_lr_fn='match_rms_adamw', muon_ns_steps=5,
+              accumulation_steps=1, adaptive_clip=False, clip_window=100,
+              clip_multiplier=3., clip_min_history=20):
         """Train with optional linear warmup, then hold learning_rate constant.
 
         optimizer_type='muon' uses native Muon for hidden Linear matrices and
         AdamW elsewhere. Default match_rms_adamw scaling uses learning_rate when
         muon_learning_rate is omitted; other scaling requires an explicit LR.
+        accumulation_steps groups nonempty input batches; token-weighted
+        backward runs separately and epoch tails are flushed. adaptive_clip
+        uses clip_multiplier times the previous clip_window raw norms after
+        clip_min_history updates. Both controls default to baseline behavior.
         Select updates (warmup_steps) or scored targets (warmup_tokens).
         Each call creates a fresh optimizer and restarts the schedule/history.
         Per-update LR, token count, loss, gradient norm, scored tokens/second,
@@ -74,7 +80,10 @@ class Decoder():
         return model.train_model_simple_function(self.decoder_model, train_loader, val_loader, optimizer, self.device, num_epochs=num_epochs, eval_freq=eval_freq, eval_iter=eval_iter,
                                                  warmup_steps=warmup_steps, warmup_tokens=warmup_tokens,
                                                  update_history=self.training_history,
-                                                 update_norm_interval=update_norm_interval)
+                                                 update_norm_interval=update_norm_interval,
+                                                 accumulation_steps=accumulation_steps,
+                                                 adaptive_clip=adaptive_clip, clip_window=clip_window,
+                                                 clip_multiplier=clip_multiplier, clip_min_history=clip_min_history)
 
     def save_weights(self, name=None):
         name = f"GPT_Model_embdim_{self.GPT_CONFIG['emb_dim']}_nlayers_{self.GPT_CONFIG['n_layers']}_nheads_{self.GPT_CONFIG['n_heads']}.pth" if name == None else safe_file_name(name)

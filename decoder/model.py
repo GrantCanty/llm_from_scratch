@@ -2,6 +2,7 @@ import torch
 from . import transformer
 from . import utils
 from .optimizers import optimizer_group_metadata
+from .training_controls import AdaptiveGradientClipper, scored_microbatch_groups, validate_accumulation_steps
 from .update_metrics import snapshot_parameters, measure_updates
 import numpy as np
 import math
@@ -109,13 +110,17 @@ class FeedForward(torch.nn.Module):
     
 
 def train_model_simple_function(model, train_loader, val_loader, optimizer, device, num_epochs, eval_freq, eval_iter,
-                                *, warmup_steps=0, warmup_tokens=0, update_history=None, update_norm_interval=100):
+                                *, warmup_steps=0, warmup_tokens=0, update_history=None, update_norm_interval=100,
+                                accumulation_steps=1, adaptive_clip=False, clip_window=100,
+                                clip_multiplier=3., clip_min_history=20):
     """Linear warmup followed by constant LR; existing result tuple is preserved.
 
     Warmup uses either optimizer updates or non-ignored targets. Each update uses
     the LR at its ending progress (first update: peak / warmup_steps, or
     peak * batch_scored_tokens / warmup_tokens). Empty-target batches do not
-    advance the schedule. A new call starts a new warmup from the supplied LRs.
+    advance the schedule. Accumulation uses the group's scored-token mean,
+    flushing partial groups at epoch end. Clipping follows normalization, once
+    across both optimizers. A new call resets warmup and clipping history.
     """
     for name, value in (("warmup_steps", warmup_steps), ("warmup_tokens", warmup_tokens)):
         if isinstance(value, bool) or not isinstance(value, Integral) or value < 0:
@@ -125,6 +130,9 @@ def train_model_simple_function(model, train_loader, val_loader, optimizer, devi
     if (isinstance(update_norm_interval, bool) or
             not isinstance(update_norm_interval, Integral) or update_norm_interval < 0):
         raise ValueError("update_norm_interval must be a nonnegative integer")
+    validate_accumulation_steps(accumulation_steps)
+    clipper = AdaptiveGradientClipper(adaptive_clip, clip_window, clip_multiplier, clip_min_history)
+    microbatches_seen = 0
     peak_lrs = [group['lr'] for group in optimizer.param_groups]
     train_losses, val_losses, val_perplexities, track_tokens_seen = [], [], [], []
     train_loss_by_pos_list, val_loss_by_pos_list = [], []
@@ -135,11 +143,8 @@ def train_model_simple_function(model, train_loader, val_loader, optimizer, devi
 
     for epoch in range(num_epochs):
         model.train()
-        for batch in train_loader:
-            input_batch, target_batch, attention_mask, document_ids, position_ids = utils.unpack_batch(batch)
-            scored_tokens = (target_batch != -100).sum().item()
-            if scored_tokens == 0:
-                continue
+        for microbatches in scored_microbatch_groups(train_loader, accumulation_steps):
+            scored_tokens = sum(count for _, count in microbatches)
             # Measure complete updates, excluding loader/evaluation time. Resetting
             # peaks retains live allocations (weights, gradients, optimizer state).
             if cuda_device is not None:
@@ -147,15 +152,19 @@ def train_model_simple_function(model, train_loader, val_loader, optimizer, devi
                 torch.cuda.reset_peak_memory_stats(cuda_device)
             step_start = time.perf_counter()
             optimizer.zero_grad()
-            loss = utils.calc_loss_batch(input_batch, target_batch, model, device, attention_mask,
-                                         document_ids=document_ids, position_ids=position_ids)
-            loss.backward()
-
-            grad_norm = torch.nn.utils.clip_grad_norm_(
-                model.parameters(),
-                max_norm=float("inf"),
-                error_if_nonfinite=True
-            )
+            loss_value = 0.0
+            for unpacked, count in microbatches:
+                input_batch, target_batch, attention_mask, document_ids, position_ids = unpacked
+                loss = utils.calc_loss_batch(input_batch, target_batch, model, device, attention_mask,
+                                             document_ids=document_ids, position_ids=position_ids)
+                if not torch.isfinite(loss).item():
+                    raise FloatingPointError('Non-finite training loss; optimizer update aborted')
+                weight = count / scored_tokens
+                (loss * weight).backward()
+                loss_value += loss.detach().item() * weight
+                del loss
+            clipping = clipper.apply(model.parameters())
+            grad_norm = clipping['grad_norm']
 
             factor = 1.0
             if warmup_steps:
@@ -179,6 +188,7 @@ def train_model_simple_function(model, train_loader, val_loader, optimizer, devi
                              if cuda_device is not None else None)
             update_norms = measure_updates(snapshot, optimizer) if snapshot is not None else None
             del snapshot
+            microbatches_seen += len(microbatches)
             tokens_seen += scored_tokens
             global_step += 1
             if update_history is not None:
@@ -187,7 +197,12 @@ def train_model_simple_function(model, train_loader, val_loader, optimizer, devi
                     'update': global_step + 1, 'scored_tokens': tokens_seen,
                     'optimizer_groups': optimizer_group_metadata(optimizer),
                     'learning_rates': [group['lr'] for group in optimizer.param_groups],
-                    'grad_norm': grad_norm.item(), 'loss': loss.item(),
+                    **clipping, 'loss': loss_value,
+                    'microbatches': len(microbatches), 'microbatches_seen': microbatches_seen,
+                    'scored_tokens_per_update': scored_tokens,
+                    'accumulation_steps': accumulation_steps,
+                    'adaptive_clip': adaptive_clip, 'clip_window': clip_window,
+                    'clip_multiplier': clip_multiplier, 'clip_min_history': clip_min_history,
                     'step_seconds': step_seconds,
                     'tokens_per_second': tokens_per_second,
                     'peak_memory_allocated_bytes': peak_allocated,
@@ -213,7 +228,7 @@ def train_model_simple_function(model, train_loader, val_loader, optimizer, devi
                 lr_summary = ', '.join(
                     f"{group.get('optimizer_name', type(optimizer).__name__)}[{index}]={group['lr']:.3g}"
                     for index, group in enumerate(optimizer.param_groups))
-                print(f'epoch {epoch+1} (step {global_step:06d})\ntrain_loss: {train_loss:.3f} val_loss: {val_loss:.3f} val_perplexity: {val_perplexity:.2f} val_accuracy: {val_accuracy:.2%} grad_norm: {grad_norm:.2f} lr: {lr_summary}')
+                print(f'epoch {epoch+1} (step {global_step:06d})\ntrain_loss: {train_loss:.3f} val_loss: {val_loss:.3f} val_perplexity: {val_perplexity:.2f} val_accuracy: {val_accuracy:.2%} grad_norm: {grad_norm:.2f} clip_factor: {clipping["clip_factor"]:.3f} lr: {lr_summary}')
                 memory = (f'{peak_allocated / 2**30:.2f} GiB allocated, '
                           f'{peak_reserved / 2**30:.2f} GiB reserved'
                           if peak_allocated is not None else 'N/A (non-CUDA)')

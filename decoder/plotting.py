@@ -48,8 +48,13 @@ def plot_training_history(history, *, parameters=None, x_axis='tokens', title=No
                 ax.set_yscale('log')
 
     all_rows = [(row, row) for row in rows]
-    line(loss_ax, all_rows, 'loss', 'Training batch loss')
+    line(loss_ax, all_rows, 'loss', 'Training update loss')
     line(grad_ax, all_rows, 'grad_norm', 'Gradient norm', log=True)
+    line(grad_ax, all_rows, 'clip_threshold', 'Adaptive clipping threshold',
+         log=True, color='tab:red', linestyle='--')
+    clipped_rows = [(row, row) for row in rows if row.get('was_clipped')]
+    line(grad_ax, clipped_rows, 'grad_norm', 'Clipped updates', log=True,
+         color='tab:red', marker='x', linestyle='none')
     for index in range(max(len(row.get('learning_rates', [])) for row in rows)):
         line(lr_ax, [(row, {'lr': row['learning_rates'][index]}) for row in rows
                      if index < len(row.get('learning_rates', []))], 'lr', f'Group {index}')

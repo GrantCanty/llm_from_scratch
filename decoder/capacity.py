@@ -7,6 +7,7 @@ import torch
 from .model import GPTModel
 from .optimizers import build_optimizer, optimizer_group_metadata
 from .utils import calc_loss_batch
+from .training_controls import AdaptiveGradientClipper, validate_accumulation_steps
 
 
 def _validate(cfg, batch_size):
@@ -19,7 +20,9 @@ def _validate(cfg, batch_size):
         raise ValueError('emb_dim must be divisible by n_heads')
 
 
-def _run_trial(cfg, batch_size, device, warmup_steps, measured_steps, learning_rate, embedding_dropout, optimizer_options=None):
+def _run_trial(cfg, batch_size, device, warmup_steps, measured_steps, learning_rate, embedding_dropout, optimizer_options=None,
+               accumulation_steps=1, adaptive_clip=False, clip_window=100,
+               clip_multiplier=3., clip_min_history=20):
     # Everything owning tensors is local; do not return tensors or exceptions.
     model = GPTModel(cfg).to(device).train()
     model.drop_emb = torch.nn.Dropout(embedding_dropout)
@@ -37,6 +40,7 @@ def _run_trial(cfg, batch_size, device, warmup_steps, measured_steps, learning_r
     document_ids = docs[:, :-1]
     position_ids = (offsets[:-1] % segment_length).expand_as(inputs)
     targets = targets.masked_fill(docs[:, :-1] != docs[:, 1:], -100)
+    clipper = AdaptiveGradientClipper(adaptive_clip, clip_window, clip_multiplier, clip_min_history)
     parameters = sum(p.numel() for p in model.parameters())
     # Include model allocation, first-use optimizer state, and warmup in peaks.
     for step in range(warmup_steps + measured_steps):
@@ -44,13 +48,17 @@ def _run_trial(cfg, batch_size, device, warmup_steps, measured_steps, learning_r
             torch.cuda.synchronize(device)
             started = time.perf_counter()
         optimizer.zero_grad(set_to_none=True)
-        # Compare backends at the same precision, including the current loss helper.
-        with torch.autocast(device_type='cuda', dtype=torch.bfloat16):
-            loss = calc_loss_batch(inputs, targets, model, device, mask,
-                                   document_ids=document_ids, position_ids=position_ids)
-        loss.backward()
+        for _ in range(accumulation_steps):
+            # Full synthetic microbatches have equal scored-target counts.
+            with torch.autocast(device_type='cuda', dtype=torch.bfloat16):
+                loss = calc_loss_batch(inputs, targets, model, device, mask,
+                                       document_ids=document_ids, position_ids=position_ids)
+            if not torch.isfinite(loss).item():
+                raise FloatingPointError('Non-finite capacity-probe loss')
+            (loss / accumulation_steps).backward()
+            del loss
+        clipper.apply(model.parameters())
         optimizer.step()
-        del loss
     torch.cuda.synchronize(device)
     elapsed = time.perf_counter() - started
     return {
@@ -58,7 +66,7 @@ def _run_trial(cfg, batch_size, device, warmup_steps, measured_steps, learning_r
         'optimizer_groups': optimizer_group_metadata(optimizer),
         'parameters': parameters,
         'seconds_per_step': elapsed / measured_steps,
-        'tokens_per_second': (targets != -100).sum().item() * measured_steps / elapsed,
+        'tokens_per_second': (targets != -100).sum().item() * accumulation_steps * measured_steps / elapsed,
     }
 
 
@@ -75,13 +83,17 @@ def _try_trial(*args, **kwargs):
 def profile_training_configs(base_cfg, candidates, *, flash_attn_func=None,
                              device='cuda', warmup_steps=2, measured_steps=3,
                              learning_rate=4e-4, embedding_dropout=.25,
-                             headroom_fraction=.1, optimizer_options=None):
+                             headroom_fraction=.1, optimizer_options=None,
+                             accumulation_steps=1, adaptive_clip=False, clip_window=100,
+                             clip_multiplier=3., clip_min_history=20):
     """Return CPU-only records for candidate dicts containing batch_size and cfg overrides.
 
     Uses full-length, unpadded batches and the current training loss helper. This
     changes no existing model weights. Close unused GPU models first for an
     accurate capacity estimate. JIT kernels/context may remain resident afterward.
     """
+    validate_accumulation_steps(accumulation_steps)
+    AdaptiveGradientClipper(adaptive_clip, clip_window, clip_multiplier, clip_min_history)
     if warmup_steps < 1 or measured_steps < 1:
         raise ValueError('Use at least one warmup and one measured step')
     if not 0 <= headroom_fraction < 1:
@@ -112,10 +124,15 @@ def profile_training_configs(base_cfg, candidates, *, flash_attn_func=None,
                 'head_dim': cfg['emb_dim'] // cfg['n_heads'], 'n_layers': cfg['n_layers'],
                 'backend': cfg.get('attention_backend', 'sdpa'),
                 'document_isolation': True,
+                'accumulation_steps': accumulation_steps, 'adaptive_clip': adaptive_clip,
+                'clip_window': clip_window, 'clip_multiplier': clip_multiplier,
+                'clip_min_history': clip_min_history,
                 'probe_document_length': cfg.get('probe_document_length', max(1, cfg['context_length'] // 2)),
             }
             record.update(_try_trial(cfg, batch_size, device, warmup_steps,
-                                     measured_steps, learning_rate, embedding_dropout, optimizer_options))
+                                     measured_steps, learning_rate, embedding_dropout, optimizer_options,
+                                     accumulation_steps, adaptive_clip, clip_window,
+                                     clip_multiplier, clip_min_history))
             peak_reserved = torch.cuda.max_memory_reserved(device)
             estimated_free_at_peak = free_before - max(0, peak_reserved - reserved_before)
             record.update(

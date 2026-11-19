@@ -21,13 +21,16 @@ class PlottingTests(unittest.TestCase):
                 parameter_kind='bias_or_norm')})
             rows.append(dict(update=update, scored_tokens=update * 1000,
                              loss=3 / update, grad_norm=.5, learning_rates=[.001, .002],
-                             tokens_per_second=100, update_norms=sample if update % 2 else None))
+                             tokens_per_second=100, update_norms=sample if update % 2 else None,
+                             clip_threshold=.4 if update > 1 else None, was_clipped=update > 1))
         fig, axes = plot_training_history(rows, parameters=['matrix.weight', 'bias'])
         self.assertEqual(len(axes.flat), 6)
         ratio = axes[1, 0]
         self.assertEqual(len(ratio.lines), 2)  # global and matrix; zero bias omitted
         self.assertEqual(list(ratio.lines[0].get_xdata()), [.001, .003])
         self.assertEqual(len(axes[0, 2].lines), 2)
+        self.assertEqual([line.get_label() for line in axes[0, 1].lines],
+                         ['Gradient norm', 'Adaptive clipping threshold', 'Clipped updates'])
         weight_ax = axes[1, 1]
         update_ax = fig.axes[-1]
         self.assertEqual(weight_ax.get_yscale(), 'linear')
