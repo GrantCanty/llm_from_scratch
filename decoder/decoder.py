@@ -3,7 +3,9 @@ from . import model
 from .optimizers import build_optimizer
 from .memory import release_optimizer, memory_report, collect_device_cache
 from pathlib import Path
-from .checkpoint import cpu_snapshot, atomic_save, rng_state
+from .checkpoint import (cpu_snapshot, atomic_save, rng_state, restore_rng_state,
+                         restore_loader_generators, validate_resume_loader, loader_generator_state,
+                         validate_optimizer_snapshot)
 
 
 class Decoder():
@@ -54,7 +56,7 @@ class Decoder():
               muon_learning_rate=None, muon_weight_decay=.1, muon_momentum=.95,
               muon_nesterov=True, muon_adjust_lr_fn='match_rms_adamw', muon_ns_steps=5,
               accumulation_steps=1, adaptive_clip=False, clip_window=100,
-              clip_multiplier=3., clip_min_history=20):
+              clip_multiplier=3., clip_min_history=20, max_updates=None):
         """Train with optional linear warmup, then hold learning_rate constant.
 
         optimizer_type='muon' uses native Muon for hidden Linear matrices and
@@ -78,7 +80,7 @@ class Decoder():
         if getattr(self, 'optimizer', None) is not None:
             raise RuntimeError('Training state is retained. Save a checkpoint, then call '
                                'cleanup_memory() or reset_weights() before a fresh train(); '
-                               'resume() is not implemented yet.')
+                               'use resume(None, train_loader, val_loader, ...) to continue.')
         self.decoder_model.drop_emb = torch.nn.Dropout(drop_rate)
 
         for name, loader in (
@@ -118,7 +120,7 @@ class Decoder():
                                                      accumulation_steps=accumulation_steps,
                                                      adaptive_clip=adaptive_clip, clip_window=clip_window,
                                                      clip_multiplier=clip_multiplier, clip_min_history=clip_min_history,
-                                                     training_state=self.training_state)
+                                                     training_state=self.training_state, max_updates=max_updates)
             return self.training_results
         except BaseException:
             self.training_state['status'] = 'interrupted_or_failed'
@@ -128,6 +130,123 @@ class Decoder():
             self.decoder_model.zero_grad(set_to_none=True)
             collect_device_cache(self.device, empty_cache=False)
             self.training_memory['after'] = self.memory_report()
+            self.training_state['continuation_rng'] = rng_state(self.device)
+            self.training_results = self.training_state.get('evaluation_results', self.training_results)
+
+    def resume(self, checkpoint_path, train_loader, val_loader, *, num_epochs=None,
+               flash_attn_func=None, expected_metadata=None, max_updates=None):
+        """Continue a full checkpoint, or retained state when checkpoint_path=None.
+
+        num_epochs is the TOTAL target, including epochs already completed.
+        max_updates optionally stops this call at a completed update boundary.
+        Deterministic map-style loaders with num_workers=0 and standard samplers,
+        or fixed batch lists/tuples, are supported. Data identity must be preserved.
+        """
+        if checkpoint_path is None:
+            if getattr(self, 'optimizer', None) is None or not self.training_state:
+                raise RuntimeError('No retained training state; provide a full checkpoint path')
+            payload = dict(training_state=self.training_state, training_config=self.training_config,
+                           training_history=self.training_history,
+                           training_results=getattr(self, 'training_results', None),
+                           metadata=getattr(self, 'checkpoint_metadata', {}))
+        else:
+            if getattr(self, 'optimizer', None) is not None:
+                raise RuntimeError('Training state is retained; explicitly cleanup/reset before loading another checkpoint')
+            payload = torch.load(checkpoint_path, map_location='cpu', weights_only=True)
+            if payload.get('format') != 'llm_by_scratch.training_checkpoint' or payload.get('format_version') != 1:
+                raise ValueError('resume() requires a supported full checkpoint, not weights only')
+        state = cpu_snapshot(payload['training_state'])
+        config = dict(payload['training_config'])
+        if not state.get('checkpoint_safe'):
+            raise ValueError('Cannot resume an incomplete optimizer update')
+        from numbers import Integral
+        target = config['num_epochs'] if num_epochs is None else num_epochs
+        if isinstance(target, bool) or not isinstance(target, Integral) or target < 1:
+            raise ValueError('num_epochs must be a positive TOTAL epoch target')
+        next_epoch = state['epoch'] + int(state['epoch_complete'])
+        if target <= next_epoch:
+            raise ValueError('Epoch target is already complete; increase num_epochs to continue training')
+        if max_updates is not None and (isinstance(max_updates, bool) or
+                not isinstance(max_updates, Integral) or max_updates < 1):
+            raise ValueError('max_updates must be a positive integer or None')
+        specs = state.get('loader_specs', {})
+        validate_resume_loader(train_loader, specs.get('train'))
+        validate_resume_loader(val_loader, specs.get('val'))
+        metadata = payload.get('metadata', {})
+        if expected_metadata is not None and any(metadata.get(k) != v for k, v in expected_metadata.items()):
+            raise ValueError('Checkpoint tokenizer/dataset metadata does not match expected_metadata')
+        # Validate explicit generator presence before touching the model or RNG.
+        for loader, generators in ((train_loader, state.get('loader_generators', {})),
+                                   (val_loader, state.get('val_loader_generators', {}))):
+            if set(loader_generator_state(loader)) != set(generators):
+                raise ValueError('Recreate loader/sampler generators as in the checkpoint')
+        if checkpoint_path is not None:
+            saved_device = torch.device(payload.get('environment', {}).get('device', str(self.device)))
+            if saved_device.type != self.device.type:
+                raise ValueError('Resume currently requires the same device type as the saved run')
+            cfg = dict(payload['model_config'])
+            kernel = flash_attn_func or self.GPT_CONFIG.get('flash_attn_func')
+            cfg['flash_attn_func'] = kernel if cfg.get('attention_backend', 'sdpa') == 'fa4' else None
+            if cfg.get('attention_backend') == 'fa4' and not callable(kernel):
+                raise ValueError('Supply the compatible flash_attn_func for this FA4 checkpoint')
+            # CPU preflight leaves the current model untouched on bad files.
+            before_rng = rng_state(self.device)
+            try:
+                restored_model = model.GPTModel(cfg)
+                restored_model.drop_emb = torch.nn.Dropout(config['drop_rate'])
+                restored_model.load_state_dict(payload['model_state_dict'], strict=True)
+                options = {key: config[key] for key in (
+                    'optimizer_type', 'learning_rate', 'weight_decay', 'adamw_betas',
+                    'muon_learning_rate', 'muon_weight_decay', 'muon_momentum',
+                    'muon_nesterov', 'muon_adjust_lr_fn', 'muon_ns_steps')}
+                prototype = build_optimizer(restored_model, **options)
+                validate_optimizer_snapshot(prototype, restored_model, payload)
+            finally:
+                restore_rng_state(before_rng, self.device)
+            del prototype
+            self.decoder_model = None
+            collect_device_cache(self.device, empty_cache=False)
+            self.GPT_CONFIG = cfg
+            self.seed = payload['seed']
+            self.decoder_model = restored_model.to(self.device)
+            self.optimizer = build_optimizer(self.decoder_model, **options)
+            self.optimizer.load_state_dict(payload['optimizer_state_dict'])
+            self.training_history = cpu_snapshot(payload.get('training_history', []))
+            self.training_results = cpu_snapshot(payload.get('training_results'))
+            self.checkpoint_metadata = cpu_snapshot(metadata)
+            self.training_state = state
+            self.training_config = config
+            if 'evaluation_results' not in state and payload.get('training_results') is not None:
+                state['evaluation_results'] = cpu_snapshot(payload['training_results'])
+            restore_rng_state(payload['rng_state'], self.device)
+            del payload  # Do not retain a CPU copy of all weights/state throughout resumed training.
+        elif 'continuation_rng' in state:
+            restore_rng_state(state['continuation_rng'], self.device)
+        restore_loader_generators(train_loader, state.get('loader_generators', {}))
+        restore_loader_generators(val_loader, state.get('val_loader_generators', {}))
+        config['num_epochs'] = target
+        self.training_config = config
+        self.training_memory = {'before': self.memory_report()}
+        try:
+            self.training_results = model.train_model_simple_function(
+                self.decoder_model, train_loader, val_loader, self.optimizer, self.device,
+                num_epochs=target, eval_freq=config['eval_freq'], eval_iter=config['eval_iter'],
+                warmup_steps=config['warmup_steps'], warmup_tokens=config['warmup_tokens'],
+                update_history=self.training_history, update_norm_interval=config['update_norm_interval'],
+                accumulation_steps=config['accumulation_steps'], adaptive_clip=config['adaptive_clip'],
+                clip_window=config['clip_window'], clip_multiplier=config['clip_multiplier'],
+                clip_min_history=config['clip_min_history'], training_state=self.training_state,
+                resume_state=state, max_updates=max_updates)
+            return self.training_results
+        except BaseException:
+            self.training_state['status'] = 'interrupted_or_failed'
+            raise
+        finally:
+            self.decoder_model.zero_grad(set_to_none=True)
+            collect_device_cache(self.device, empty_cache=False)
+            self.training_memory['after'] = self.memory_report()
+            self.training_state['continuation_rng'] = rng_state(self.device)
+            self.training_results = self.training_state.get('evaluation_results', self.training_results)
 
     def memory_report(self):
         """Current live/cache byte counts, plus this model's weights/gradients."""
@@ -152,13 +271,14 @@ class Decoder():
         self.optimizer = None
         self.training_state = None
         self.training_config = None
+        self.checkpoint_metadata = {}
         # CPU histories/results remain available for plotting.
 
     def save_checkpoint(self, name=None, *, checkpoint=True, metadata=None):
         """Atomically save full training state, or a plain weights-only state dict.
 
         Full snapshots require retained state at a completed update boundary.
-        Saving never cleans up memory. Loading/resuming full files is separate.
+        Saving never cleans up memory. Load and continue full files with resume().
         metadata can identify the tokenizer, dataset/split, and data-order recipe.
         """
         if not isinstance(checkpoint, bool):
@@ -193,19 +313,22 @@ class Decoder():
             rng_state=rng_state(self.device), seed=self.seed,
             model_training=self.decoder_model.training,
             environment=dict(torch_version=str(torch.__version__), device=str(self.device)),
-            metadata=metadata or {},
-            data_resume_note='Epoch/batch progress and exposed loader generator states are recorded. '
-                             'Exact restoration of arbitrary iterable datasets, workers/prefetch, '
-                             'or custom samplers is not implemented; retain the data-order recipe.',
+            metadata=(metadata if metadata is not None else getattr(self, 'checkpoint_metadata', {})),
+            data_resume_note='Resume supports deterministic map-style loaders with num_workers=0 '
+                             'and standard samplers or fixed batch lists. Preserve data identity; '
+                             'streaming, worker prefetch, and custom sampler restoration are unsupported.',
         )
-        return atomic_save(cpu_snapshot(payload), name)
+        path = atomic_save(cpu_snapshot(payload), name)
+        if metadata is not None:
+            self.checkpoint_metadata = cpu_snapshot(metadata)
+        return path
 
     def load_weights(self, path):
         if getattr(self, 'optimizer', None) is not None:
             raise RuntimeError('Call cleanup_memory() or reset_weights() before replacing weights.')
         state = torch.load(path, map_location='cpu', weights_only=True)
         if state.get('format') == 'llm_by_scratch.training_checkpoint':
-            raise ValueError('This is a full checkpoint; full checkpoint loading/resume is not implemented yet.')
+            raise ValueError('This is a full checkpoint; use resume() to load and continue full checkpoints.')
         self.decoder_model.load_state_dict(state)
 
 def safe_file_name(name):

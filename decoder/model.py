@@ -2,7 +2,7 @@ import torch
 from . import transformer
 from . import utils
 from .optimizers import optimizer_group_metadata
-from .checkpoint import rng_state, loader_generator_state
+from .checkpoint import (rng_state, loader_generator_state, loader_spec, replay_epoch, cpu_snapshot)
 from .training_controls import AdaptiveGradientClipper, scored_microbatch_groups, validate_accumulation_steps
 from .update_metrics import snapshot_parameters, measure_updates
 import numpy as np
@@ -113,7 +113,8 @@ class FeedForward(torch.nn.Module):
 def train_model_simple_function(model, train_loader, val_loader, optimizer, device, num_epochs, eval_freq, eval_iter,
                                 *, warmup_steps=0, warmup_tokens=0, update_history=None, update_norm_interval=100,
                                 accumulation_steps=1, adaptive_clip=False, clip_window=100,
-                                clip_multiplier=3., clip_min_history=20, training_state=None):
+                                clip_multiplier=3., clip_min_history=20, training_state=None,
+                                resume_state=None, max_updates=None):
     """Linear warmup followed by constant LR; existing result tuple is preserved.
 
     Warmup uses either optimizer updates or non-ignored targets. Each update uses
@@ -121,7 +122,7 @@ def train_model_simple_function(model, train_loader, val_loader, optimizer, devi
     peak * batch_scored_tokens / warmup_tokens). Empty-target batches do not
     advance the schedule. Accumulation uses the group's scored-token mean,
     flushing partial groups at epoch end. Clipping follows normalization, once
-    across both optimizers. A new call resets warmup and clipping history.
+    across both optimizers. Fresh calls reset progress; resume_state restores it.
     """
     for name, value in (("warmup_steps", warmup_steps), ("warmup_tokens", warmup_tokens)):
         if isinstance(value, bool) or not isinstance(value, Integral) or value < 0:
@@ -133,6 +134,10 @@ def train_model_simple_function(model, train_loader, val_loader, optimizer, devi
         raise ValueError("update_norm_interval must be a nonnegative integer")
     validate_accumulation_steps(accumulation_steps)
     clipper = AdaptiveGradientClipper(adaptive_clip, clip_window, clip_multiplier, clip_min_history)
+    if max_updates is not None and (isinstance(max_updates, bool) or
+            not isinstance(max_updates, Integral) or max_updates < 1):
+        raise ValueError('max_updates must be a positive integer or None')
+    prior = cpu_snapshot(resume_state) if resume_state is not None else None
     microbatches_seen = 0
     peak_lrs = [group['lr'] for group in optimizer.param_groups]
     train_losses, val_losses, val_perplexities, track_tokens_seen = [], [], [], []
@@ -141,24 +146,63 @@ def train_model_simple_function(model, train_loader, val_loader, optimizer, devi
     peak_reserves = []
     tokens_seen, global_step = 0, -1
     cuda_device = torch.device(device) if torch.device(device).type == 'cuda' else None
+    start_epoch = 0
+    if prior is not None:
+        if not prior.get('checkpoint_safe'):
+            raise ValueError('Cannot resume an incomplete optimizer update')
+        if (prior['warmup']['steps'], prior['warmup']['tokens']) != (warmup_steps, warmup_tokens):
+            raise ValueError('Warmup configuration differs from checkpoint')
+        clipper.load_state_dict(prior['adaptive_clipping'])
+        microbatches_seen = prior['microbatches_seen']
+        tokens_seen, global_step = prior['scored_tokens'], prior['updates'] - 1
+        peak_lrs = prior['warmup']['peak_lrs']
+        start_epoch = prior['epoch'] + int(prior['epoch_complete'])
+        previous_results = prior.get('evaluation_results')
+        if previous_results is not None:
+            (train_losses, train_loss_by_pos_list, val_losses, val_loss_by_pos_list,
+             val_perplexities, val_accuracies, track_tokens_seen, previous_peak) = cpu_snapshot(previous_results)
+            if previous_peak is not None:
+                peak_reserves.append(previous_peak)
+    stop_update = global_step + 1 + max_updates if max_updates is not None else None
+
+    def results():
+        values = (train_losses, train_loss_by_pos_list, val_losses, val_loss_by_pos_list,
+                  val_perplexities, val_accuracies, track_tokens_seen,
+                  max((peak for peak in peak_reserves if peak is not None), default=None))
+        if training_state is not None:
+            training_state['evaluation_results'] = values
+        return values
+
     if training_state is not None:
-        training_state.update(status='running', checkpoint_safe=True, updates=0,
-                              scored_tokens=0, microbatches_seen=0, epoch=0,
-                              epoch_complete=False, batches_consumed_epoch=0,
+        training_state.update(status='running', checkpoint_safe=True, updates=global_step + 1,
+                              scored_tokens=tokens_seen, microbatches_seen=microbatches_seen,
+                              epoch=start_epoch, epoch_complete=False,
+                              batches_consumed_epoch=(prior['batches_consumed_epoch']
+                                  if prior and not prior['epoch_complete'] else 0),
                               warmup=dict(steps=warmup_steps, tokens=warmup_tokens,
                                           peak_lrs=peak_lrs),
-                              adaptive_clipping=clipper.state_dict())
+                              adaptive_clipping=clipper.state_dict(),
+                              loader_specs=dict(train=loader_spec(train_loader), val=loader_spec(val_loader)))
+        results()
 
     # Release local snapshots/graphs even when a notebook retains a traceback.
     # External optimizer ownership is unchanged for this lower-level API.
     try:
-        for epoch in range(num_epochs):
+        for epoch in range(start_epoch, num_epochs):
             model.train()
-            if training_state is not None:
-                training_state.update(epoch=epoch, epoch_complete=False, batches_consumed_epoch=0,
-                                      epoch_start_rng=rng_state(device),
-                                      epoch_start_loader_generators=loader_generator_state(train_loader))
-            for microbatches in scored_microbatch_groups(train_loader, accumulation_steps, training_state):
+            replaying = prior is not None and epoch == start_epoch and not prior['epoch_complete']
+            if replaying:
+                epoch_loader = replay_epoch(train_loader, prior, device)
+                if training_state is not None:
+                    training_state.update(epoch=epoch, epoch_start_rng=prior['epoch_start_rng'],
+                        epoch_start_loader_generators=prior.get('epoch_start_loader_generators', {}))
+            else:
+                epoch_loader = train_loader
+                if training_state is not None:
+                    training_state.update(epoch=epoch, epoch_complete=False, batches_consumed_epoch=0,
+                                          epoch_start_rng=rng_state(device),
+                                          epoch_start_loader_generators=loader_generator_state(train_loader))
+            for microbatches in scored_microbatch_groups(epoch_loader, accumulation_steps, training_state):
                 scored_tokens = sum(count for _, count in microbatches)
                 # Measure complete updates, excluding loader/evaluation time. Resetting
                 # peaks retains live allocations (weights, gradients, optimizer state).
@@ -254,17 +298,24 @@ def train_model_simple_function(model, train_loader, val_loader, optimizer, devi
                               f'{peak_reserved / 2**30:.2f} GiB reserved'
                               if peak_allocated is not None else 'N/A (non-CUDA)')
                     print(f'last update: {tokens_per_second:,.0f} scored tokens/s | peak memory: {memory}')
+                    results()
+
+                if stop_update is not None and global_step + 1 >= stop_update:
+                    if training_state is not None:
+                        training_state['status'] = 'stopped'
+                    return results()
 
             if training_state is not None:
                 training_state.update(epoch_complete=True, checkpoint_safe=True,
                                       loader_generators=loader_generator_state(train_loader))
         if training_state is not None:
             training_state['status'] = 'complete'
-        return train_losses, train_loss_by_pos_list, val_losses, val_loss_by_pos_list, val_perplexities, val_accuracies, track_tokens_seen, max((peak for peak in peak_reserves if peak is not None), default=None)
+        return results()
     finally:
         if training_state is not None:
             training_state['loader_generators'] = loader_generator_state(train_loader)
-        loss = snapshot = microbatches = unpacked = None
+            training_state['val_loader_generators'] = loader_generator_state(val_loader)
+        loss = snapshot = microbatches = unpacked = epoch_loader = None
         input_batch = target_batch = attention_mask = document_ids = position_ids = None
         train_loss_by_pos = val_loss_by_pos = None
 

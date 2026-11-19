@@ -80,3 +80,16 @@ class AdaptiveGradientClipper:
                     multiplier=self.multiplier, min_history=self.min_history,
                     norms=list(self.norms), updates=self.updates,
                     clipped_updates=self.clipped_updates)
+
+
+    def load_state_dict(self, state):
+        config = (state['enabled'], state['window'], state['multiplier'], state['min_history'])
+        if config != (self.enabled, self.norms.maxlen, self.multiplier, self.min_history):
+            raise ValueError('Adaptive clipping configuration differs from checkpoint')
+        norms = state['norms']
+        if len(norms) > self.norms.maxlen or any(not math.isfinite(x) or x < 0 for x in norms):
+            raise ValueError('Invalid adaptive clipping norm history')
+        self.norms.clear()
+        self.norms.extend(norms)
+        self.updates = state['updates']
+        self.clipped_updates = state['clipped_updates']
