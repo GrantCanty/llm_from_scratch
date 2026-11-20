@@ -16,13 +16,20 @@ def main():
     parser.add_argument('--name', default='trial')
     parser.add_argument('--batch-size', type=int, default=4)
     parser.add_argument('--seq-len', type=int, default=1024)
+    parser.add_argument('--layers', type=int, default=4)
+    parser.add_argument('--width', type=int, default=512)
+    parser.add_argument('--heads', type=int, default=8)
+    parser.add_argument('--vocab-size', type=int, default=4096)
     parser.add_argument('--steps', type=int, default=300)
     parser.add_argument('--warmup', type=int, default=20,
                         help='Untimed training steps before measurement')
     parser.add_argument('--log-every', type=int, default=50)
     args = parser.parse_args()
-    if min(args.batch_size, args.seq_len, args.steps, args.log_every) < 1:
-        parser.error('Batch size, sequence length, steps and log interval must be positive')
+    if min(args.batch_size, args.seq_len, args.steps, args.log_every,
+           args.layers, args.width, args.heads, args.vocab_size) < 1:
+        parser.error('All size/count arguments except warmup must be positive')
+    if args.width % args.heads:
+        parser.error('Width must be divisible by heads')
     if args.warmup < 0 or not math.isfinite(args.lr) or args.lr <= 0:
         parser.error('Warmup must be nonnegative and LR must be finite and positive')
 
@@ -38,16 +45,16 @@ def main():
     device = torch.device('cuda:0')
     dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
     scaler = torch.amp.GradScaler('cuda', enabled=dtype == torch.float16)
-    vocab_size, width = 4096, 512
+    vocab_size, width = args.vocab_size, args.width
 
     class TinyLM(nn.Module):
         def __init__(self):
             super().__init__()
             self.embedding = nn.Embedding(vocab_size, width)
             self.blocks = nn.ModuleList([
-                nn.TransformerEncoderLayer(width, 8, 4 * width, dropout=0,
+                nn.TransformerEncoderLayer(width, args.heads, 4 * width, dropout=0,
                                            batch_first=True, norm_first=True)
-                for _ in range(4)
+                for _ in range(args.layers)
             ])
             self.norm = nn.LayerNorm(width)
             self.head = nn.Linear(width, vocab_size, bias=False)
@@ -66,6 +73,7 @@ def main():
     mask = torch.ones(args.seq_len, args.seq_len, device=device, dtype=torch.bool).triu(1)
     print(json.dumps(dict(name=args.name, pid=os.getpid(), gpu=torch.cuda.get_device_name(),
                           dtype=str(dtype), parameters=sum(p.numel() for p in model.parameters()),
+                          configuration=vars(args),
                           mps_pipe=os.environ.get('CUDA_MPS_PIPE_DIRECTORY'),
                           mps_memory_limit=os.environ.get('CUDA_MPS_PINNED_DEVICE_MEM_LIMIT'))),
           flush=True)
@@ -85,16 +93,26 @@ def main():
     torch.cuda.synchronize()
     torch.cuda.reset_peak_memory_stats()
     started = time.perf_counter()
+    interval_started, interval_step = started, 0
     for index in range(1, args.steps + 1):
         loss = step()
         if index % args.log_every == 0 or index == args.steps:
             torch.cuda.synchronize()
-            elapsed = time.perf_counter() - started
+            now = time.perf_counter()
+            elapsed = now - started
+            interval_tps = ((index - interval_step) * args.batch_size * args.seq_len
+                            / (now - interval_started))
             loss_value = loss.item()
             if not math.isfinite(loss_value):
                 raise RuntimeError('Nonfinite loss during training')
             print(f'{args.name}: step={index} loss={loss_value:.4f} '
-                  f'tokens/s={index * args.batch_size * args.seq_len / elapsed:,.0f}', flush=True)
+                  f'tokens/s={index * args.batch_size * args.seq_len / elapsed:,.0f} '
+                  f'interval_tokens/s={interval_tps:,.0f} '
+                  f'allocated={torch.cuda.memory_allocated() / 2**30:.2f}GiB '
+                  f'reserved={torch.cuda.memory_reserved() / 2**30:.2f}GiB '
+                  f'peak_allocated={torch.cuda.max_memory_allocated() / 2**30:.2f}GiB',
+                  flush=True)
+            interval_started, interval_step = time.perf_counter(), index
     elapsed = time.perf_counter() - started
     print(json.dumps(dict(name=args.name, status='completed', steps=args.steps,
                           seconds=elapsed, final_loss=loss_value,
