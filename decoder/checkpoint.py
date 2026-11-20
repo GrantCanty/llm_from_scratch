@@ -1,4 +1,4 @@
-"""Versioned snapshots, RNG restoration, and deterministic loader replay."""
+"""Versioned snapshots, RNG restoration, and direct/replayed loader continuation."""
 import copy
 import os
 from pathlib import Path
@@ -41,7 +41,8 @@ def loader_generator_state(loader):
     This is not a generic cursor for arbitrary iterable datasets or prefetchers.
     """
     states = {}
-    for name, owner in (('loader', loader), ('sampler', getattr(loader, 'sampler', None))):
+    for name, owner in (('loader', loader), ('sampler', getattr(loader, 'sampler', None)),
+                        ('batch_sampler', getattr(loader, 'batch_sampler', None))):
         generator = getattr(owner, 'generator', None)
         if isinstance(generator, torch.Generator):
             states[name] = generator.get_state().cpu()
@@ -86,7 +87,8 @@ def restore_rng_state(state, device):
 
 
 def restore_loader_generators(loader, state):
-    for name, owner in (('loader', loader), ('sampler', getattr(loader, 'sampler', None))):
+    for name, owner in (('loader', loader), ('sampler', getattr(loader, 'sampler', None)),
+                        ('batch_sampler', getattr(loader, 'batch_sampler', None))):
         generator = getattr(owner, 'generator', None)
         if name in state:
             if not isinstance(generator, torch.Generator):
@@ -103,6 +105,8 @@ def loader_spec(loader):
         return dict(kind='batches', length=len(loader))
     if not isinstance(loader, DataLoader):
         return dict(kind='unsupported', type=type(loader).__qualname__)
+    from .sampling import resumable_sampler
+    sampler = resumable_sampler(loader)
     collator = loader.collate_fn
     def safe_len(value):
         try:
@@ -116,6 +120,7 @@ def loader_spec(loader):
                 batch_size=loader.batch_size, drop_last=loader.drop_last,
                 num_workers=loader.num_workers,
                 sampler=type(loader.sampler).__qualname__,
+                **(dict(resumable_batch_sampler=sampler.config_dict()) if sampler is not None else {}),
                 sampler_replacement=getattr(loader.sampler, 'replacement', None),
                 sampler_num_samples=getattr(loader.sampler, 'num_samples', None),
                 collator=(asdict(collator) if is_dataclass(collator) and not isinstance(collator, type)
@@ -132,7 +137,8 @@ def validate_resume_loader(loader, saved_spec=None):
         if loader.num_workers != 0 or isinstance(loader.dataset, IterableDataset):
             raise ValueError('Resume requires a map-style DataLoader with num_workers=0; '
                              'streaming/worker-prefetch restoration is not supported')
-        if type(loader.sampler) not in (RandomSampler, SequentialSampler) or type(loader.batch_sampler) is not BatchSampler:
+        from .sampling import resumable_sampler
+        if resumable_sampler(loader) is None and (type(loader.sampler) not in (RandomSampler, SequentialSampler) or type(loader.batch_sampler) is not BatchSampler):
             raise ValueError('Resume does not support custom samplers/batch samplers')
     else:
         raise ValueError('Resume requires a map-style DataLoader or a list/tuple of fixed batches')
@@ -172,3 +178,22 @@ def validate_optimizer_snapshot(optimizer, model, payload):
             for key in ('exp_avg', 'exp_avg_sq', 'max_exp_avg_sq', 'momentum_buffer'):
                 if key in values and values[key].shape != parameter.shape:
                     raise ValueError('Optimizer buffer shape differs from parameter')
+
+
+
+def direct_epoch(loader, sampler_state, device):
+    """Start at committed indices without fetching a consumed data prefix."""
+    from .sampling import resumable_sampler
+    sampler = resumable_sampler(loader)
+    if sampler is None:
+        raise ValueError('Recreate the loader with ResumableBatchSampler')
+    sampler.load_state_dict(sampler_state)
+    current_rng = rng_state(device)
+    generators = loader_generator_state(loader)
+    try:
+        # A new DataLoader iterator consumes a base seed, even with zero workers.
+        iterator = iter(loader)
+    finally:
+        restore_rng_state(current_rng, device)
+        restore_loader_generators(loader, generators)
+    return iterator

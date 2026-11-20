@@ -2,8 +2,9 @@ import torch
 from . import transformer
 from . import utils
 from .optimizers import optimizer_group_metadata
-from .checkpoint import (rng_state, loader_generator_state, loader_spec, replay_epoch, cpu_snapshot)
+from .checkpoint import (rng_state, loader_generator_state, loader_spec, replay_epoch, direct_epoch, cpu_snapshot)
 from .training_controls import AdaptiveGradientClipper, scored_microbatch_groups, validate_accumulation_steps
+from .sampling import resumable_sampler, evaluation_view, commit_loader_position
 from .update_metrics import snapshot_parameters, measure_updates
 import numpy as np
 import math
@@ -137,6 +138,8 @@ def train_model_simple_function(model, train_loader, val_loader, optimizer, devi
     if max_updates is not None and (isinstance(max_updates, bool) or
             not isinstance(max_updates, Integral) or max_updates < 1):
         raise ValueError('max_updates must be a positive integer or None')
+    if training_state is None and resumable_sampler(train_loader) is not None:
+        training_state = {}
     prior = cpu_snapshot(resume_state) if resume_state is not None else None
     microbatches_seen = 0
     peak_lrs = [group['lr'] for group in optimizer.param_groups]
@@ -182,7 +185,8 @@ def train_model_simple_function(model, train_loader, val_loader, optimizer, devi
                               warmup=dict(steps=warmup_steps, tokens=warmup_tokens,
                                           peak_lrs=peak_lrs),
                               adaptive_clipping=clipper.state_dict(),
-                              loader_specs=dict(train=loader_spec(train_loader), val=loader_spec(val_loader)))
+                              loader_specs=dict(train=loader_spec(train_loader), val=loader_spec(val_loader)),
+                              examples_consumed=prior.get('examples_consumed', 0) if prior else 0)
         results()
 
     # Release local snapshots/graphs even when a notebook retains a traceback.
@@ -192,11 +196,16 @@ def train_model_simple_function(model, train_loader, val_loader, optimizer, devi
             model.train()
             replaying = prior is not None and epoch == start_epoch and not prior['epoch_complete']
             if replaying:
-                epoch_loader = replay_epoch(train_loader, prior, device)
+                epoch_loader = (direct_epoch(train_loader, prior['sampler_state'], device)
+                                if prior.get('sampler_state') is not None
+                                else replay_epoch(train_loader, prior, device))
                 if training_state is not None:
                     training_state.update(epoch=epoch, epoch_start_rng=prior['epoch_start_rng'],
                         epoch_start_loader_generators=prior.get('epoch_start_loader_generators', {}))
             else:
+                sampler = resumable_sampler(train_loader)
+                if sampler is not None:
+                    sampler.set_epoch(epoch, reset=(prior is None and epoch == 0))
                 epoch_loader = train_loader
                 if training_state is not None:
                     training_state.update(epoch=epoch, epoch_complete=False, batches_consumed_epoch=0,
@@ -237,6 +246,7 @@ def train_model_simple_function(model, train_loader, val_loader, optimizer, devi
                                       (global_step + 2) % update_norm_interval == 0))
                 snapshot = snapshot_parameters(model, optimizer) if sample_update else None
                 optimizer.step()
+                commit_loader_position(train_loader, training_state)
                 if training_state is not None:
                     training_state.update(checkpoint_safe=True, updates=global_step + 2,
                                           scored_tokens=tokens_seen + scored_tokens,
@@ -265,6 +275,10 @@ def train_model_simple_function(model, train_loader, val_loader, optimizer, devi
                         **clipping, 'loss': loss_value,
                         'microbatches': len(microbatches), 'microbatches_seen': microbatches_seen,
                         'scored_tokens_per_update': scored_tokens,
+                        'examples_consumed': (training_state.get('examples_consumed')
+                                              if training_state is not None else None),
+                        'examples_consumed_epoch': (training_state.get('examples_consumed_epoch')
+                                                    if training_state is not None else None),
                         'accumulation_steps': accumulation_steps,
                         'adaptive_clip': adaptive_clip, 'clip_window': clip_window,
                         'clip_multiplier': clip_multiplier, 'clip_min_history': clip_min_history,
@@ -275,7 +289,8 @@ def train_model_simple_function(model, train_loader, val_loader, optimizer, devi
                     })
 
                 if global_step % eval_freq == 0:
-                    train_loss, train_loss_by_pos, val_loss, val_loss_by_pos, val_perplexity, val_accuracy = evaluate_model(model, train_loader, val_loader, device, eval_iter)
+                    with evaluation_view(train_loader), evaluation_view(val_loader):
+                        train_loss, train_loss_by_pos, val_loss, val_loss_by_pos, val_perplexity, val_accuracy = evaluate_model(model, train_loader, val_loader, device, eval_iter)
 
                     train_losses.append(train_loss)
                     val_losses.append(val_loss)
@@ -305,6 +320,7 @@ def train_model_simple_function(model, train_loader, val_loader, optimizer, devi
                         training_state['status'] = 'stopped'
                     return results()
 
+            commit_loader_position(train_loader, training_state)
             if training_state is not None:
                 training_state.update(epoch_complete=True, checkpoint_safe=True,
                                       loader_generators=loader_generator_state(train_loader))
@@ -315,6 +331,9 @@ def train_model_simple_function(model, train_loader, val_loader, optimizer, devi
         if training_state is not None:
             training_state['loader_generators'] = loader_generator_state(train_loader)
             training_state['val_loader_generators'] = loader_generator_state(val_loader)
+            val_sampler = resumable_sampler(val_loader)
+            if val_sampler is not None:
+                training_state['val_sampler_state'] = val_sampler.state_dict()
         loss = snapshot = microbatches = unpacked = epoch_loader = None
         input_batch = target_batch = attention_mask = document_ids = position_ids = None
         train_loss_by_pos = val_loss_by_pos = None

@@ -1,6 +1,7 @@
 import torch
 from . import model
 from .optimizers import build_optimizer
+from .sampling import resumable_sampler
 from .memory import release_optimizer, memory_report, collect_device_cache
 from pathlib import Path
 from .checkpoint import (cpu_snapshot, atomic_save, rng_state, restore_rng_state,
@@ -139,8 +140,9 @@ class Decoder():
 
         num_epochs is the TOTAL target, including epochs already completed.
         max_updates optionally stops this call at a completed update boundary.
-        Deterministic map-style loaders with num_workers=0 and standard samplers,
-        or fixed batch lists/tuples, are supported. Data identity must be preserved.
+        Deterministic map-style loaders with num_workers=0 support standard
+        samplers (prefix replay) or ResumableBatchSampler (direct committed
+        position). Fixed batch lists/tuples also work. Preserve data identity.
         """
         if checkpoint_path is None:
             if getattr(self, 'optimizer', None) is None or not self.training_state:
@@ -172,6 +174,15 @@ class Decoder():
         specs = state.get('loader_specs', {})
         validate_resume_loader(train_loader, specs.get('train'))
         validate_resume_loader(val_loader, specs.get('val'))
+        for loader, key in ((train_loader, 'sampler_state'), (val_loader, 'val_sampler_state')):
+            saved_sampler = state.get(key)
+            sampler = resumable_sampler(loader)
+            if saved_sampler is not None:
+                if sampler is None:
+                    raise ValueError('Recreate the loader with ResumableBatchSampler')
+                sampler.validate_state_dict(saved_sampler)
+            elif sampler is not None and state['updates']:
+                raise ValueError('Checkpoint has no committed sampler state for this loader')
         metadata = payload.get('metadata', {})
         if expected_metadata is not None and any(metadata.get(k) != v for k, v in expected_metadata.items()):
             raise ValueError('Checkpoint tokenizer/dataset metadata does not match expected_metadata')
@@ -222,6 +233,9 @@ class Decoder():
             del payload  # Do not retain a CPU copy of all weights/state throughout resumed training.
         elif 'continuation_rng' in state:
             restore_rng_state(state['continuation_rng'], self.device)
+        for loader, key in ((train_loader, 'sampler_state'), (val_loader, 'val_sampler_state')):
+            if state.get(key) is not None:
+                resumable_sampler(loader).load_state_dict(state[key])
         restore_loader_generators(train_loader, state.get('loader_generators', {}))
         restore_loader_generators(val_loader, state.get('val_loader_generators', {}))
         config['num_epochs'] = target
@@ -315,7 +329,7 @@ class Decoder():
             environment=dict(torch_version=str(torch.__version__), device=str(self.device)),
             metadata=(metadata if metadata is not None else getattr(self, 'checkpoint_metadata', {})),
             data_resume_note='Resume supports deterministic map-style loaders with num_workers=0 '
-                             'and standard samplers or fixed batch lists. Preserve data identity; '
+                             'and standard/resumable samplers or fixed batch lists. Preserve data identity; '
                              'streaming, worker prefetch, and custom sampler restoration are unsupported.',
         )
         path = atomic_save(cpu_snapshot(payload), name)
