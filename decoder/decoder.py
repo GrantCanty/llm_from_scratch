@@ -1,6 +1,7 @@
 import torch
 from . import model
 from .optimizers import build_optimizer
+from .schedules import LearningRateSchedule
 from .sampling import resumable_sampler
 from .memory import release_optimizer, memory_report, collect_device_cache
 from pathlib import Path
@@ -57,8 +58,9 @@ class Decoder():
               muon_learning_rate=None, muon_weight_decay=.1, muon_momentum=.95,
               muon_nesterov=True, muon_adjust_lr_fn='match_rms_adamw', muon_ns_steps=5,
               accumulation_steps=1, adaptive_clip=False, clip_window=100,
-              clip_multiplier=3., clip_min_history=20, max_updates=None):
-        """Train with optional linear warmup, then hold learning_rate constant.
+              clip_multiplier=3., clip_min_history=20, max_updates=None,
+              lr_decay='constant', decay_steps=0, decay_tokens=0, min_lr_ratio=.1):
+        """Train with linear warmup and optional cosine decay (constant by default).
 
         optimizer_type='muon' uses native Muon for hidden Linear matrices and
         AdamW elsewhere. Default match_rms_adamw scaling uses learning_rate when
@@ -82,6 +84,9 @@ class Decoder():
             raise RuntimeError('Training state is retained. Save a checkpoint, then call '
                                'cleanup_memory() or reset_weights() before a fresh train(); '
                                'use resume(None, train_loader, val_loader, ...) to continue.')
+        LearningRateSchedule(warmup_steps=warmup_steps, warmup_tokens=warmup_tokens,
+                             lr_decay=lr_decay, decay_steps=decay_steps,
+                             decay_tokens=decay_tokens, min_lr_ratio=min_lr_ratio)
         self.decoder_model.drop_emb = torch.nn.Dropout(drop_rate)
 
         for name, loader in (
@@ -109,6 +114,7 @@ class Decoder():
             muon_momentum=muon_momentum, muon_nesterov=muon_nesterov,
             muon_adjust_lr_fn=muon_adjust_lr_fn, muon_ns_steps=muon_ns_steps,
             warmup_steps=warmup_steps, warmup_tokens=warmup_tokens,
+            lr_decay=lr_decay, decay_steps=decay_steps, decay_tokens=decay_tokens, min_lr_ratio=min_lr_ratio,
             update_norm_interval=update_norm_interval, accumulation_steps=accumulation_steps,
             adaptive_clip=adaptive_clip, clip_window=clip_window,
             clip_multiplier=clip_multiplier, clip_min_history=clip_min_history)
@@ -121,7 +127,9 @@ class Decoder():
                                                      accumulation_steps=accumulation_steps,
                                                      adaptive_clip=adaptive_clip, clip_window=clip_window,
                                                      clip_multiplier=clip_multiplier, clip_min_history=clip_min_history,
-                                                     training_state=self.training_state, max_updates=max_updates)
+                                                     training_state=self.training_state, max_updates=max_updates,
+                                                     lr_decay=lr_decay, decay_steps=decay_steps,
+                                                     decay_tokens=decay_tokens, min_lr_ratio=min_lr_ratio)
             return self.training_results
         except BaseException:
             self.training_state['status'] = 'interrupted_or_failed'
@@ -159,6 +167,12 @@ class Decoder():
                 raise ValueError('resume() requires a supported full checkpoint, not weights only')
         state = cpu_snapshot(payload['training_state'])
         config = dict(payload['training_config'])
+        schedule = LearningRateSchedule(
+            warmup_steps=config['warmup_steps'], warmup_tokens=config['warmup_tokens'],
+            lr_decay=config.get('lr_decay', 'constant'), decay_steps=config.get('decay_steps', 0),
+            decay_tokens=config.get('decay_tokens', 0), min_lr_ratio=config.get('min_lr_ratio', .1))
+        if state.get('lr_schedule') is not None and state['lr_schedule'] != schedule.state_dict():
+            raise ValueError('Learning-rate schedule differs from checkpoint')
         if not state.get('checkpoint_safe'):
             raise ValueError('Cannot resume an incomplete optimizer update')
         from numbers import Integral
@@ -250,7 +264,9 @@ class Decoder():
                 accumulation_steps=config['accumulation_steps'], adaptive_clip=config['adaptive_clip'],
                 clip_window=config['clip_window'], clip_multiplier=config['clip_multiplier'],
                 clip_min_history=config['clip_min_history'], training_state=self.training_state,
-                resume_state=state, max_updates=max_updates)
+                resume_state=state, max_updates=max_updates,
+                lr_decay=config.get('lr_decay', 'constant'), decay_steps=config.get('decay_steps', 0),
+                decay_tokens=config.get('decay_tokens', 0), min_lr_ratio=config.get('min_lr_ratio', .1))
             return self.training_results
         except BaseException:
             self.training_state['status'] = 'interrupted_or_failed'

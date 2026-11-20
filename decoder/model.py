@@ -4,6 +4,7 @@ from . import utils
 from .optimizers import optimizer_group_metadata
 from .checkpoint import (rng_state, loader_generator_state, loader_spec, replay_epoch, direct_epoch, cpu_snapshot)
 from .training_controls import AdaptiveGradientClipper, scored_microbatch_groups, validate_accumulation_steps
+from .schedules import LearningRateSchedule
 from .sampling import resumable_sampler, evaluation_view, commit_loader_position
 from .update_metrics import snapshot_parameters, measure_updates
 import numpy as np
@@ -115,8 +116,9 @@ def train_model_simple_function(model, train_loader, val_loader, optimizer, devi
                                 *, warmup_steps=0, warmup_tokens=0, update_history=None, update_norm_interval=100,
                                 accumulation_steps=1, adaptive_clip=False, clip_window=100,
                                 clip_multiplier=3., clip_min_history=20, training_state=None,
-                                resume_state=None, max_updates=None):
-    """Linear warmup followed by constant LR; existing result tuple is preserved.
+                                resume_state=None, max_updates=None, lr_decay='constant',
+                                decay_steps=0, decay_tokens=0, min_lr_ratio=.1):
+    """Linear warmup with optional cosine decay; existing result tuple is preserved.
 
     Warmup uses either optimizer updates or non-ignored targets. Each update uses
     the LR at its ending progress (first update: peak / warmup_steps, or
@@ -125,11 +127,9 @@ def train_model_simple_function(model, train_loader, val_loader, optimizer, devi
     flushing partial groups at epoch end. Clipping follows normalization, once
     across both optimizers. Fresh calls reset progress; resume_state restores it.
     """
-    for name, value in (("warmup_steps", warmup_steps), ("warmup_tokens", warmup_tokens)):
-        if isinstance(value, bool) or not isinstance(value, Integral) or value < 0:
-            raise ValueError(f"{name} must be a nonnegative integer")
-    if warmup_steps and warmup_tokens:
-        raise ValueError("Choose warmup_steps or warmup_tokens, not both")
+    schedule = LearningRateSchedule(warmup_steps=warmup_steps, warmup_tokens=warmup_tokens,
+                                    lr_decay=lr_decay, decay_steps=decay_steps,
+                                    decay_tokens=decay_tokens, min_lr_ratio=min_lr_ratio)
     if (isinstance(update_norm_interval, bool) or
             not isinstance(update_norm_interval, Integral) or update_norm_interval < 0):
         raise ValueError("update_norm_interval must be a nonnegative integer")
@@ -155,6 +155,10 @@ def train_model_simple_function(model, train_loader, val_loader, optimizer, devi
             raise ValueError('Cannot resume an incomplete optimizer update')
         if (prior['warmup']['steps'], prior['warmup']['tokens']) != (warmup_steps, warmup_tokens):
             raise ValueError('Warmup configuration differs from checkpoint')
+        saved_schedule = prior.get('lr_schedule')
+        if ((saved_schedule is not None and saved_schedule != schedule.state_dict()) or
+                (saved_schedule is None and lr_decay != 'constant')):
+            raise ValueError('Learning-rate schedule differs from checkpoint')
         clipper.load_state_dict(prior['adaptive_clipping'])
         microbatches_seen = prior['microbatches_seen']
         tokens_seen, global_step = prior['scored_tokens'], prior['updates'] - 1
@@ -184,6 +188,7 @@ def train_model_simple_function(model, train_loader, val_loader, optimizer, devi
                                   if prior and not prior['epoch_complete'] else 0),
                               warmup=dict(steps=warmup_steps, tokens=warmup_tokens,
                                           peak_lrs=peak_lrs),
+                              lr_schedule=schedule.state_dict(),
                               adaptive_clipping=clipper.state_dict(),
                               loader_specs=dict(train=loader_spec(train_loader), val=loader_spec(val_loader)),
                               examples_consumed=prior.get('examples_consumed', 0) if prior else 0)
@@ -234,11 +239,8 @@ def train_model_simple_function(model, train_loader, val_loader, optimizer, devi
                 clipping = clipper.apply(model.parameters())
                 grad_norm = clipping['grad_norm']
 
-                factor = 1.0
-                if warmup_steps:
-                    factor = min(1.0, (global_step + 2) / warmup_steps)
-                elif warmup_tokens:
-                    factor = min(1.0, (tokens_seen + scored_tokens) / warmup_tokens)
+                factor, lr_phase = schedule.at(updates=global_step + 2,
+                                               tokens=tokens_seen + scored_tokens)
                 for group, peak_lr in zip(optimizer.param_groups, peak_lrs):
                     group['lr'] = peak_lr * factor
                 sample_update = (update_history is not None and update_norm_interval > 0
@@ -272,6 +274,7 @@ def train_model_simple_function(model, train_loader, val_loader, optimizer, devi
                         'update': global_step + 1, 'scored_tokens': tokens_seen,
                         'optimizer_groups': optimizer_group_metadata(optimizer),
                         'learning_rates': [group['lr'] for group in optimizer.param_groups],
+                        'lr_factor': factor, 'lr_phase': lr_phase,
                         **clipping, 'loss': loss_value,
                         'microbatches': len(microbatches), 'microbatches_seen': microbatches_seen,
                         'scored_tokens_per_update': scored_tokens,
