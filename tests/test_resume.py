@@ -8,6 +8,7 @@ import torch
 from torch.utils.data import DataLoader, TensorDataset, IterableDataset
 
 from decoder.decoder import Decoder
+from decoder.sampling import ResumableBatchSampler
 
 
 class ResumeTests(unittest.TestCase):
@@ -92,6 +93,30 @@ class ResumeTests(unittest.TestCase):
         self.assert_equivalent(baseline, paused)
         with self.assertRaisesRegex(ValueError, 'already complete'):
             paused.resume(None, train, val)
+
+    def test_resume_on_unseen_loader_and_resume_its_partial_checkpoint(self):
+        def new_loader():
+            data = TensorDataset(torch.tensor([[10, 11, 12], [11, 12, 13]]),
+                                 torch.tensor([[11, 12, 13], [12, 13, 14]]))
+            return DataLoader(data, batch_sampler=ResumableBatchSampler(data, batch_size=1))
+
+        trained = self.make_decoder()
+        old_train, val = self.loaders()
+        trained.train(old_train, val, num_epochs=1)
+        old_tokens = trained.training_state['scored_tokens']
+        old_updates = trained.training_state['updates']
+        with tempfile.TemporaryDirectory() as directory:
+            old_path = trained.save_checkpoint(Path(directory) / 'old')
+            continued = self.make_decoder()
+            continued.resume(old_path, new_loader(), val, new_data=True, max_updates=1)
+            self.assertEqual(continued.training_state['sampler_state']['position'], 1)
+            self.assertEqual(continued.training_state['scored_tokens'], old_tokens + 3)
+            new_path = continued.save_checkpoint(Path(directory) / 'new')
+            restored = self.make_decoder()
+            restored.resume(new_path, new_loader(), self.loaders()[1])
+            self.assertEqual(restored.training_state['updates'], old_updates + 2)
+            self.assertEqual(restored.training_state['scored_tokens'], old_tokens + 6)
+            self.assertTrue(restored.training_state['epoch_complete'])
 
     def test_file_epoch_boundary_extension(self):
         baseline = self.make_decoder()

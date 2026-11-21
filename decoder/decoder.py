@@ -143,7 +143,8 @@ class Decoder():
             self.training_results = self.training_state.get('evaluation_results', self.training_results)
 
     def resume(self, checkpoint_path, train_loader, val_loader, *, num_epochs=None,
-               flash_attn_func=None, expected_metadata=None, max_updates=None):
+               flash_attn_func=None, expected_metadata=None, max_updates=None,
+               new_data=False):
         """Continue a full checkpoint, or retained state when checkpoint_path=None.
 
         num_epochs is the TOTAL target, including epochs already completed.
@@ -151,6 +152,8 @@ class Decoder():
         Deterministic map-style loaders with num_workers=0 support standard
         samplers (prefix replay) or ResumableBatchSampler (direct committed
         position). Fixed batch lists/tuples also work. Preserve data identity.
+        With new_data=True, start one additional epoch after a completed epoch.
+        Supply a training loader containing only unseen examples and omit num_epochs.
         """
         if checkpoint_path is None:
             if getattr(self, 'optimizer', None) is None or not self.training_state:
@@ -176,12 +179,24 @@ class Decoder():
         if not state.get('checkpoint_safe'):
             raise ValueError('Cannot resume an incomplete optimizer update')
         from numbers import Integral
-        target = config['num_epochs'] if num_epochs is None else num_epochs
+        next_epoch = state['epoch'] + int(state['epoch_complete'])
+        if new_data:
+            if not state['epoch_complete']:
+                raise ValueError('new_data=True requires a completed training epoch')
+            if num_epochs is not None:
+                raise ValueError('Omit num_epochs with new_data=True; it adds one epoch')
+            # The previous training cursor and generator belong to the old loader.
+            for key in ('sampler_state', 'loader_generators', 'epoch_start_loader_generators',
+                        'epoch_start_rng', 'examples_consumed_epoch'):
+                state.pop(key, None)
+            state['loader_specs'] = {**state.get('loader_specs', {}), 'train': None}
+            state['loader_generators'] = loader_generator_state(train_loader)
+        target = next_epoch + 1 if new_data else config['num_epochs'] if num_epochs is None else num_epochs
         if isinstance(target, bool) or not isinstance(target, Integral) or target < 1:
             raise ValueError('num_epochs must be a positive TOTAL epoch target')
-        next_epoch = state['epoch'] + int(state['epoch_complete'])
         if target <= next_epoch:
-            raise ValueError('Epoch target is already complete; increase num_epochs to continue training')
+            raise ValueError('Epoch target is already complete; use new_data=True for an unseen-only '
+                             'loader or increase num_epochs to repeat the original dataset')
         if max_updates is not None and (isinstance(max_updates, bool) or
                 not isinstance(max_updates, Integral) or max_updates < 1):
             raise ValueError('max_updates must be a positive integer or None')
@@ -195,7 +210,7 @@ class Decoder():
                 if sampler is None:
                     raise ValueError('Recreate the loader with ResumableBatchSampler')
                 sampler.validate_state_dict(saved_sampler)
-            elif sampler is not None and state['updates']:
+            elif sampler is not None and state['updates'] and not (new_data and key == 'sampler_state'):
                 raise ValueError('Checkpoint has no committed sampler state for this loader')
         metadata = payload.get('metadata', {})
         if expected_metadata is not None and any(metadata.get(k) != v for k, v in expected_metadata.items()):
@@ -252,6 +267,11 @@ class Decoder():
                 resumable_sampler(loader).load_state_dict(state[key])
         restore_loader_generators(train_loader, state.get('loader_generators', {}))
         restore_loader_generators(val_loader, state.get('val_loader_generators', {}))
+        if new_data:
+            sampler = resumable_sampler(train_loader)
+            if sampler is not None:
+                sampler.set_epoch(next_epoch, reset=True)
+            self.training_state = state
         config['num_epochs'] = target
         self.training_config = config
         self.training_memory = {'before': self.memory_report()}
