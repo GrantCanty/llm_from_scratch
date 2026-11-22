@@ -34,11 +34,30 @@ class ScheduleTests(unittest.TestCase):
                    dict(lr_decay='cosine', warmup_tokens=10, decay_steps=100),
                    dict(lr_decay='cosine', warmup_steps=10, decay_tokens=100),
                    dict(lr_decay='cosine', warmup_tokens=10, decay_tokens=10),
+                   dict(lr_decay='cosine', warmup_steps=2, lr_sustain_steps=3, decay_steps=5),
+                   dict(lr_decay='cosine', lr_sustain_steps=2, decay_tokens=100),
+                   dict(lr_sustain_steps=2),
                    dict(lr_decay='cosine', decay_steps=1.5), dict(decay_steps=True),
                    dict(min_lr_ratio=-1), dict(min_lr_ratio=float('nan')), dict(min_lr_ratio=2)]
         for config in invalid:
             with self.subTest(config=config), self.assertRaises(ValueError):
                 LearningRateSchedule(**config)
+
+    def test_step_sustain_holds_peak_and_keeps_the_endpoint(self):
+        schedule = LearningRateSchedule(warmup_steps=2, lr_sustain_steps=2,
+                                        lr_decay='cosine', decay_steps=6)
+        self.assertEqual(schedule.at(updates=2, tokens=999), (1., 'warmup'))
+        for update in (3, 4):
+            self.assertEqual(schedule.at(updates=update, tokens=999), (1., 'sustain'))
+        self.assertEqual(schedule.at(updates=5, tokens=999), (.55, 'decay'))
+        self.assertEqual(schedule.at(updates=6, tokens=999), (.1, 'minimum'))
+
+    def test_old_schedule_state_defaults_to_zero_sustain(self):
+        schedule = LearningRateSchedule(lr_decay='cosine', decay_steps=10)
+        legacy = schedule.state_dict()
+        del legacy['lr_sustain_steps'], legacy['lr_sustain_tokens']
+        self.assertTrue(schedule.matches_state(legacy))
+        self.assertFalse(LearningRateSchedule(**legacy, lr_sustain_steps=2).matches_state(legacy))
 
 
 class DecayResumeTests(unittest.TestCase):
@@ -66,7 +85,8 @@ class DecayResumeTests(unittest.TestCase):
                 continue
             options = dict(num_epochs=2, optimizer_type=kind, learning_rate=.004,
                            muon_learning_rate=.002, drop_rate=.2, accumulation_steps=2,
-                           warmup_tokens=6, lr_decay='cosine', decay_tokens=12,
+                           warmup_tokens=2, lr_sustain_tokens=4,
+                           lr_decay='cosine', decay_tokens=12,
                            min_lr_ratio=.1, eval_freq=1, eval_iter=1,
                            adaptive_clip=True, clip_min_history=1, clip_window=3)
             baseline = self.make_decoder()
@@ -81,7 +101,8 @@ class DecayResumeTests(unittest.TestCase):
                 torch.testing.assert_close(expected, restored.decoder_model.state_dict()[name], rtol=0, atol=0)
             self.assertEqual([r['learning_rates'] for r in baseline.training_history],
                              [r['learning_rates'] for r in restored.training_history])
-            schedule = LearningRateSchedule(warmup_tokens=6, lr_decay='cosine', decay_tokens=12)
+            schedule = LearningRateSchedule(warmup_tokens=2, lr_sustain_tokens=4,
+                                            lr_decay='cosine', decay_tokens=12)
             for row in restored.training_history:
                 factor, phase = schedule.at(updates=row['update'], tokens=row['scored_tokens'])
                 self.assertEqual(row['lr_phase'], phase)
@@ -89,6 +110,7 @@ class DecayResumeTests(unittest.TestCase):
                 for actual, peak in zip(row['learning_rates'], [.004, .002]):
                     self.assertAlmostEqual(actual, peak * factor)
             self.assertEqual(restored.training_history[-1]['lr_phase'], 'minimum')
+            self.assertIn('sustain', [row['lr_phase'] for row in restored.training_history])
             self.assertEqual(restored.training_state['lr_schedule']['decay_tokens'], 12)
             # Extending training does not stretch/restart the saved horizon.
             restored.resume(None, *self.loaders(), num_epochs=3)
@@ -100,7 +122,8 @@ class DecayResumeTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             path = original.save_checkpoint(Path(directory) / 'legacy')
             payload = torch.load(path, weights_only=True)
-            for key in ('lr_decay', 'decay_steps', 'decay_tokens', 'min_lr_ratio'):
+            for key in ('lr_decay', 'decay_steps', 'decay_tokens', 'min_lr_ratio',
+                        'lr_sustain_steps', 'lr_sustain_tokens'):
                 payload['training_config'].pop(key)
             payload['training_state'].pop('lr_schedule')
             torch.save(payload, path)

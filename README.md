@@ -592,41 +592,42 @@ samplers other than this explicit supported class remain rejected on resume.
 ## Learning-rate decay
 
 Cosine decay is optional; `lr_decay='constant'` preserves existing training.
-Use an explicit total scored-token horizon (including warmup):
+Use an explicit total scored-token horizon that includes warmup and any sustain period:
 
 ```python
 train_results = model.train(
     train_loader, val_loader, num_epochs=1,
     optimizer_type='muon', learning_rate=LR,
     warmup_tokens=6_500_000,
+    lr_sustain_tokens=10_000_000,
     lr_decay='cosine', decay_tokens=79_000_000,
     min_lr_ratio=0.1,
     accumulation_steps=4,
 )
 ```
 
-This warms up linearly through 6.5M actual scored tokens, then cosine-decays from
-peak LR to 10% of peak at 79M total scored tokens. `decay_tokens` is the endpoint,
-not an additional duration after warmup. Set it to the planned exposure across
+This warms up linearly through 6.5M actual scored tokens, holds peak LR through
+16.5M, then cosine-decays to 10% of peak at 79M total scored tokens.
+`decay_tokens` is the endpoint. Set it to the planned exposure across
 ALL epochs; repeated exposure counts again, ignored labels do not. The horizon
 does not stop training: afterward the LR stays at its minimum. Epoch count and
 `max_updates` retain their separate meanings.
 
-Alternatively pair `warmup_steps=400` with `lr_decay='cosine', decay_steps=4830`.
-Steps mean completed optimizer updates, not microbatches. Exactly one positive
-decay horizon is required for cosine; it must exceed warmup and use the same
-unit. Mixed step/token warmup/decay is rejected. Without warmup, decay starts
-immediately. `min_lr_ratio` must be in [0, 1]; 0 allows a zero endpoint, while
-0.1 is a configurable starting value rather than an established optimum.
+For an update-based schedule, use `warmup_steps=400`, `lr_sustain_steps=600`,
+and `lr_decay='cosine', decay_steps=4830`. Steps count completed optimizer
+updates. Use the same unit for warmup, sustain, and decay. The decay endpoint
+must exceed warmup plus sustain. Sustain defaults to zero, so cosine decay
+begins as soon as progress exceeds the warmup budget.
+`min_lr_ratio` sets the final fraction of peak LR and must be in [0, 1].
 
-For progress p, warmup W, and endpoint D, the post-warmup factor is
-`min_lr_ratio + (1-min_lr_ratio) * (1+cos(pi*(p-W)/(D-W))) / 2`, with progress
+For progress p, decay start S (warmup plus sustain), and endpoint D, the decay factor is
+`min_lr_ratio + (1-min_lr_ratio) * (1+cos(pi*(p-S)/(D-S))) / 2`, with progress
 clamped at the endpoint. Each update uses its ENDING progress, consistent with
 existing warmup. Crossing the token endpoint in a group therefore applies the
 minimum LR to that update. Both AdamW and Muon use the same factor on their own
 saved peak LRs; relative group LR differences are preserved.
 
-History records `lr_factor` and `lr_phase` (`warmup`, `constant`, `decay`, or
+History records `lr_factor` and `lr_phase` (`warmup`, `sustain`, `constant`, `decay`, or
 `minimum`), and the existing LR plot shows the curve automatically. Full
 checkpoints preserve schedule configuration, peak LRs, and progress. Resume
 continues the curve without restarting warmup or rescaling an already-decayed

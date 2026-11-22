@@ -59,7 +59,8 @@ class Decoder():
               muon_nesterov=True, muon_adjust_lr_fn='match_rms_adamw', muon_ns_steps=5,
               accumulation_steps=1, adaptive_clip=False, clip_window=100,
               clip_multiplier=3., clip_min_history=20, max_updates=None,
-              lr_decay='constant', decay_steps=0, decay_tokens=0, min_lr_ratio=.1):
+              lr_decay='constant', decay_steps=0, decay_tokens=0, min_lr_ratio=.1,
+              lr_sustain_steps=0, lr_sustain_tokens=0):
         """Train with linear warmup and optional cosine decay (constant by default).
 
         optimizer_type='muon' uses native Muon for hidden Linear matrices and
@@ -70,6 +71,8 @@ class Decoder():
         uses clip_multiplier times the previous clip_window raw norms after
         clip_min_history updates. Both controls default to baseline behavior.
         Select updates (warmup_steps) or scored targets (warmup_tokens).
+        With cosine decay, lr_sustain_steps or lr_sustain_tokens holds peak LR
+        in the same unit before decay to the configured endpoint.
         A fresh call requires no retained optimizer (explicit cleanup/reset).
         On return/interruption, only gradients/temporaries are freed; optimizer,
         warmup/clipping progress, and history remain for save_checkpoint().
@@ -86,7 +89,8 @@ class Decoder():
                                'use resume(None, train_loader, val_loader, ...) to continue.')
         LearningRateSchedule(warmup_steps=warmup_steps, warmup_tokens=warmup_tokens,
                              lr_decay=lr_decay, decay_steps=decay_steps,
-                             decay_tokens=decay_tokens, min_lr_ratio=min_lr_ratio)
+                             decay_tokens=decay_tokens, min_lr_ratio=min_lr_ratio,
+                             lr_sustain_steps=lr_sustain_steps, lr_sustain_tokens=lr_sustain_tokens)
         self.decoder_model.drop_emb = torch.nn.Dropout(drop_rate)
 
         for name, loader in (
@@ -115,6 +119,7 @@ class Decoder():
             muon_adjust_lr_fn=muon_adjust_lr_fn, muon_ns_steps=muon_ns_steps,
             warmup_steps=warmup_steps, warmup_tokens=warmup_tokens,
             lr_decay=lr_decay, decay_steps=decay_steps, decay_tokens=decay_tokens, min_lr_ratio=min_lr_ratio,
+            lr_sustain_steps=lr_sustain_steps, lr_sustain_tokens=lr_sustain_tokens,
             update_norm_interval=update_norm_interval, accumulation_steps=accumulation_steps,
             adaptive_clip=adaptive_clip, clip_window=clip_window,
             clip_multiplier=clip_multiplier, clip_min_history=clip_min_history)
@@ -129,7 +134,8 @@ class Decoder():
                                                      clip_multiplier=clip_multiplier, clip_min_history=clip_min_history,
                                                      training_state=self.training_state, max_updates=max_updates,
                                                      lr_decay=lr_decay, decay_steps=decay_steps,
-                                                     decay_tokens=decay_tokens, min_lr_ratio=min_lr_ratio)
+                                                     decay_tokens=decay_tokens, min_lr_ratio=min_lr_ratio,
+                                                     lr_sustain_steps=lr_sustain_steps, lr_sustain_tokens=lr_sustain_tokens)
             return self.training_results
         except BaseException:
             self.training_state['status'] = 'interrupted_or_failed'
@@ -173,8 +179,10 @@ class Decoder():
         schedule = LearningRateSchedule(
             warmup_steps=config['warmup_steps'], warmup_tokens=config['warmup_tokens'],
             lr_decay=config.get('lr_decay', 'constant'), decay_steps=config.get('decay_steps', 0),
-            decay_tokens=config.get('decay_tokens', 0), min_lr_ratio=config.get('min_lr_ratio', .1))
-        if state.get('lr_schedule') is not None and state['lr_schedule'] != schedule.state_dict():
+            decay_tokens=config.get('decay_tokens', 0), min_lr_ratio=config.get('min_lr_ratio', .1),
+            lr_sustain_steps=config.get('lr_sustain_steps', 0),
+            lr_sustain_tokens=config.get('lr_sustain_tokens', 0))
+        if state.get('lr_schedule') is not None and not schedule.matches_state(state['lr_schedule']):
             raise ValueError('Learning-rate schedule differs from checkpoint')
         if not state.get('checkpoint_safe'):
             raise ValueError('Cannot resume an incomplete optimizer update')
@@ -286,7 +294,9 @@ class Decoder():
                 clip_min_history=config['clip_min_history'], training_state=self.training_state,
                 resume_state=state, max_updates=max_updates,
                 lr_decay=config.get('lr_decay', 'constant'), decay_steps=config.get('decay_steps', 0),
-                decay_tokens=config.get('decay_tokens', 0), min_lr_ratio=config.get('min_lr_ratio', .1))
+                decay_tokens=config.get('decay_tokens', 0), min_lr_ratio=config.get('min_lr_ratio', .1),
+                lr_sustain_steps=config.get('lr_sustain_steps', 0),
+                lr_sustain_tokens=config.get('lr_sustain_tokens', 0))
             return self.training_results
         except BaseException:
             self.training_state['status'] = 'interrupted_or_failed'

@@ -117,7 +117,8 @@ def train_model_simple_function(model, train_loader, val_loader, optimizer, devi
                                 accumulation_steps=1, adaptive_clip=False, clip_window=100,
                                 clip_multiplier=3., clip_min_history=20, training_state=None,
                                 resume_state=None, max_updates=None, lr_decay='constant',
-                                decay_steps=0, decay_tokens=0, min_lr_ratio=.1):
+                                decay_steps=0, decay_tokens=0, min_lr_ratio=.1,
+                                lr_sustain_steps=0, lr_sustain_tokens=0):
     """Linear warmup with optional cosine decay; existing result tuple is preserved.
 
     Warmup uses either optimizer updates or non-ignored targets. Each update uses
@@ -129,7 +130,8 @@ def train_model_simple_function(model, train_loader, val_loader, optimizer, devi
     """
     schedule = LearningRateSchedule(warmup_steps=warmup_steps, warmup_tokens=warmup_tokens,
                                     lr_decay=lr_decay, decay_steps=decay_steps,
-                                    decay_tokens=decay_tokens, min_lr_ratio=min_lr_ratio)
+                                    decay_tokens=decay_tokens, min_lr_ratio=min_lr_ratio,
+                                    lr_sustain_steps=lr_sustain_steps, lr_sustain_tokens=lr_sustain_tokens)
     if (isinstance(update_norm_interval, bool) or
             not isinstance(update_norm_interval, Integral) or update_norm_interval < 0):
         raise ValueError("update_norm_interval must be a nonnegative integer")
@@ -156,7 +158,7 @@ def train_model_simple_function(model, train_loader, val_loader, optimizer, devi
         if (prior['warmup']['steps'], prior['warmup']['tokens']) != (warmup_steps, warmup_tokens):
             raise ValueError('Warmup configuration differs from checkpoint')
         saved_schedule = prior.get('lr_schedule')
-        if ((saved_schedule is not None and saved_schedule != schedule.state_dict()) or
+        if ((saved_schedule is not None and not schedule.matches_state(saved_schedule)) or
                 (saved_schedule is None and lr_decay != 'constant')):
             raise ValueError('Learning-rate schedule differs from checkpoint')
         clipper.load_state_dict(prior['adaptive_clipping'])
