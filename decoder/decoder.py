@@ -12,11 +12,11 @@ from .checkpoint import (cpu_snapshot, atomic_save, rng_state, restore_rng_state
 
 class Decoder():
     def __init__(self, n_layers=12, emb_dim = 768, n_heads=12, context_length = 256, seed=123,
-                 attention_backend="sdpa", flash_attn_func=None):
+                 attention_backend="sdpa", flash_attn_func=None, vocab_size = 50257):
         self.seed = seed
 
         self.GPT_CONFIG = {
-            "vocab_size": 50257,
+            "vocab_size": vocab_size,
             "context_length": context_length,
             "emb_dim": emb_dim,
             "n_heads": n_heads,
