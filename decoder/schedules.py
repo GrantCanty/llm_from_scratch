@@ -30,9 +30,6 @@ class LearningRateSchedule:
             if (decay_steps and (warmup_tokens or lr_sustain_tokens)
                     or decay_tokens and (warmup_steps or lr_sustain_steps)):
                 raise ValueError('Warmup, sustain, and decay must use the same unit (steps or tokens)')
-            decay_start = warmup_steps + warmup_tokens + lr_sustain_steps + lr_sustain_tokens
-            if (decay_steps or decay_tokens) <= decay_start:
-                raise ValueError('Decay horizon must be greater than warmup plus sustain')
         self.config = dict(warmup_steps=warmup_steps, warmup_tokens=warmup_tokens,
                            lr_decay=lr_decay, decay_steps=decay_steps,
                            decay_tokens=decay_tokens, min_lr_ratio=min_lr_ratio,
@@ -57,7 +54,9 @@ class LearningRateSchedule:
         if sustain and progress <= decay_start:
             return 1., 'sustain'
         horizon = cfg['decay_steps'] or cfg['decay_tokens']
-        fraction = min(1., max(0., (progress - decay_start) / (horizon - decay_start)))
         floor = cfg['min_lr_ratio']
+        if progress >= horizon:
+            return floor, 'minimum'
+        fraction = max(0., (progress - decay_start) / (horizon - decay_start))
         factor = floor + .5 * (1. - floor) * (1. + math.cos(math.pi * fraction))
-        return factor, 'minimum' if fraction == 1. else 'decay'
+        return factor, 'decay'

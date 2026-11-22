@@ -615,9 +615,9 @@ does not stop training: afterward the LR stays at its minimum. Epoch count and
 
 For an update-based schedule, use `warmup_steps=400`, `lr_sustain_steps=600`,
 and `lr_decay='cosine', decay_steps=4830`. Steps count completed optimizer
-updates. Use the same unit for warmup, sustain, and decay. The decay endpoint
-must exceed warmup plus sustain. Sustain defaults to zero, so cosine decay
-begins as soon as progress exceeds the warmup budget.
+updates. Use the same unit for warmup, sustain, and decay. Sustain defaults to
+zero. If the decay endpoint falls at or before the end of warmup and sustain,
+LR drops directly to the minimum on the first update after those phases.
 `min_lr_ratio` sets the final fraction of peak LR and must be in [0, 1].
 
 For progress p, decay start S (warmup plus sustain), and endpoint D, the decay factor is

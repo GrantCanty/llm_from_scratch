@@ -33,8 +33,6 @@ class ScheduleTests(unittest.TestCase):
                    dict(lr_decay='cosine'), dict(lr_decay='cosine', decay_steps=1, decay_tokens=1),
                    dict(lr_decay='cosine', warmup_tokens=10, decay_steps=100),
                    dict(lr_decay='cosine', warmup_steps=10, decay_tokens=100),
-                   dict(lr_decay='cosine', warmup_tokens=10, decay_tokens=10),
-                   dict(lr_decay='cosine', warmup_steps=2, lr_sustain_steps=3, decay_steps=5),
                    dict(lr_decay='cosine', lr_sustain_steps=2, decay_tokens=100),
                    dict(lr_sustain_steps=2),
                    dict(lr_decay='cosine', decay_steps=1.5), dict(decay_steps=True),
@@ -58,6 +56,15 @@ class ScheduleTests(unittest.TestCase):
         del legacy['lr_sustain_steps'], legacy['lr_sustain_tokens']
         self.assertTrue(schedule.matches_state(legacy))
         self.assertFalse(LearningRateSchedule(**legacy, lr_sustain_steps=2).matches_state(legacy))
+
+    def test_endpoint_during_warmup_or_sustain_preserves_both_phases(self):
+        for endpoint in (1, 2, 4, 5):
+            with self.subTest(endpoint=endpoint):
+                schedule = LearningRateSchedule(warmup_steps=2, lr_sustain_steps=3,
+                                                lr_decay='cosine', decay_steps=endpoint)
+                self.assertEqual(schedule.at(updates=2, tokens=0), (1., 'warmup'))
+                self.assertEqual(schedule.at(updates=5, tokens=0), (1., 'sustain'))
+                self.assertEqual(schedule.at(updates=6, tokens=0), (.1, 'minimum'))
 
 
 class DecayResumeTests(unittest.TestCase):
