@@ -60,7 +60,7 @@ class Decoder():
               accumulation_steps=1, adaptive_clip=False, clip_window=100,
               clip_multiplier=3., clip_min_history=20, max_updates=None,
               lr_decay='constant', decay_steps=0, decay_tokens=0, min_lr_ratio=.1,
-              lr_sustain_steps=0, lr_sustain_tokens=0):
+              lr_sustain_steps=0, lr_sustain_tokens=0, bpb_eval=None):
         """Train with linear warmup and optional cosine decay (constant by default).
 
         optimizer_type='muon' uses native Muon for hidden Linear matrices and
@@ -73,6 +73,8 @@ class Decoder():
         Select updates (warmup_steps) or scored targets (warmup_tokens).
         With cosine decay, lr_sustain_steps or lr_sustain_tokens holds peak LR
         in the same unit before decay to the configured endpoint.
+        Pass bpb_eval=(texts, tokenizer) to score fixed raw validation texts
+        at each evaluation.
         A fresh call requires no retained optimizer (explicit cleanup/reset).
         On return/interruption, only gradients/temporaries are freed; optimizer,
         warmup/clipping progress, and history remain for save_checkpoint().
@@ -135,7 +137,8 @@ class Decoder():
                                                      training_state=self.training_state, max_updates=max_updates,
                                                      lr_decay=lr_decay, decay_steps=decay_steps,
                                                      decay_tokens=decay_tokens, min_lr_ratio=min_lr_ratio,
-                                                     lr_sustain_steps=lr_sustain_steps, lr_sustain_tokens=lr_sustain_tokens)
+                                                     lr_sustain_steps=lr_sustain_steps, lr_sustain_tokens=lr_sustain_tokens,
+                                                     bpb_eval=bpb_eval)
             return self.training_results
         except BaseException:
             self.training_state['status'] = 'interrupted_or_failed'
@@ -150,7 +153,7 @@ class Decoder():
 
     def resume(self, checkpoint_path, train_loader, val_loader, *, num_epochs=None,
                flash_attn_func=None, expected_metadata=None, max_updates=None,
-               new_data=False):
+               new_data=False, bpb_eval=None):
         """Continue a full checkpoint, or retained state when checkpoint_path=None.
 
         num_epochs is the TOTAL target, including epochs already completed.
@@ -160,6 +163,7 @@ class Decoder():
         position). Fixed batch lists/tuples also work. Preserve data identity.
         With new_data=True, start one additional epoch after a completed epoch.
         Supply a training loader containing only unseen examples and omit num_epochs.
+        Pass bpb_eval=(texts, tokenizer) again to continue validation BPB.
         """
         if checkpoint_path is None:
             if getattr(self, 'optimizer', None) is None or not self.training_state:
@@ -296,7 +300,7 @@ class Decoder():
                 lr_decay=config.get('lr_decay', 'constant'), decay_steps=config.get('decay_steps', 0),
                 decay_tokens=config.get('decay_tokens', 0), min_lr_ratio=config.get('min_lr_ratio', .1),
                 lr_sustain_steps=config.get('lr_sustain_steps', 0),
-                lr_sustain_tokens=config.get('lr_sustain_tokens', 0))
+                lr_sustain_tokens=config.get('lr_sustain_tokens', 0), bpb_eval=bpb_eval)
             return self.training_results
         except BaseException:
             self.training_state['status'] = 'interrupted_or_failed'

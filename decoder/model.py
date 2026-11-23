@@ -5,6 +5,7 @@ from .optimizers import optimizer_group_metadata
 from .checkpoint import (rng_state, loader_generator_state, loader_spec, replay_epoch, direct_epoch, cpu_snapshot)
 from .training_controls import AdaptiveGradientClipper, scored_microbatch_groups, validate_accumulation_steps
 from .schedules import LearningRateSchedule
+from .evaluation import evaluate_bpb
 from .sampling import resumable_sampler, evaluation_view, commit_loader_position
 from .update_metrics import snapshot_parameters, measure_updates
 import numpy as np
@@ -118,7 +119,8 @@ def train_model_simple_function(model, train_loader, val_loader, optimizer, devi
                                 clip_multiplier=3., clip_min_history=20, training_state=None,
                                 resume_state=None, max_updates=None, lr_decay='constant',
                                 decay_steps=0, decay_tokens=0, min_lr_ratio=.1,
-                                lr_sustain_steps=0, lr_sustain_tokens=0):
+                                lr_sustain_steps=0, lr_sustain_tokens=0,
+                                bpb_eval=None):
     """Linear warmup with optional cosine decay; existing result tuple is preserved.
 
     Warmup uses either optimizer updates or non-ignored targets. Each update uses
@@ -128,6 +130,9 @@ def train_model_simple_function(model, train_loader, val_loader, optimizer, devi
     flushing partial groups at epoch end. Clipping follows normalization, once
     across both optimizers. Fresh calls reset progress; resume_state restores it.
     """
+    if bpb_eval is not None:
+        texts, tokenizer = bpb_eval
+        bpb_eval = tuple(texts), tokenizer
     schedule = LearningRateSchedule(warmup_steps=warmup_steps, warmup_tokens=warmup_tokens,
                                     lr_decay=lr_decay, decay_steps=decay_steps,
                                     decay_tokens=decay_tokens, min_lr_ratio=min_lr_ratio,
@@ -296,6 +301,12 @@ def train_model_simple_function(model, train_loader, val_loader, optimizer, devi
                 if global_step % eval_freq == 0:
                     with evaluation_view(train_loader), evaluation_view(val_loader):
                         train_loss, train_loss_by_pos, val_loss, val_loss_by_pos, val_perplexity, val_accuracy = evaluate_model(model, train_loader, val_loader, device, eval_iter)
+                    if bpb_eval is not None:
+                        texts, tokenizer = bpb_eval
+                        val_bpb = evaluate_bpb(model, texts, tokenizer)
+                        if update_history is not None:
+                            update_history[-1]['val_bpb'] = val_bpb
+                        print(f'val_bpb: {val_bpb:.4f}')
 
                     train_losses.append(train_loss)
                     val_losses.append(val_loss)
